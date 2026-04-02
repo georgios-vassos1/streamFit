@@ -3,7 +3,7 @@
 \title{Single-step RLS-GLM update}
 \usage{
 rls_glm_update(x, y, beta, S, family, lambda = 1, eta_clip = 10,
-  score_clip = NULL)
+  score_clip = NULL, offset = 0)
 }
 \arguments{
 \item{x}{Numeric vector of length \code{p}. Feature vector.}
@@ -16,6 +16,8 @@ rls_glm_update(x, y, beta, S, family, lambda = 1, eta_clip = 10,
 \item{eta_clip}{Positive scalar. Linear predictor is clamped to
 \code{[-eta_clip, eta_clip]}. Default \code{10}.}
 \item{score_clip}{Optional positive scalar. Clamps the score contribution.}
+\item{offset}{Numeric scalar offset added to the linear predictor.
+Typical use: \code{log(exposure)} in Poisson rate models. Default \code{0}.}
 }
 \value{
 A list with:

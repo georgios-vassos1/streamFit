@@ -18,6 +18,8 @@
 #' @param S Numeric matrix `p x p`. Current inverse covariance matrix.
 #' @param lambda Forgetting factor in `(0, 1]`. Default `1` (no forgetting).
 #'   Effective memory window: `1 / (1 - lambda)`.
+#' @param offset Numeric scalar offset added to the linear predictor.
+#'   Typical use: `log(exposure)` in Poisson rate models. Default `0`.
 #'
 #' @return A list with:
 #'   \describe{
@@ -43,7 +45,7 @@
 #' }
 #'
 #' @export
-rls_update <- function(x, y, beta, S, lambda = 1.0) {
+rls_update <- function(x, y, beta, S, lambda = 1.0, offset = 0) {
   if (!is.numeric(lambda) || length(lambda) != 1 || lambda <= 0 || lambda > 1)
     stop("'lambda' must be a scalar in (0, 1]")
   if (length(x) != length(beta))
@@ -54,7 +56,7 @@ rls_update <- function(x, y, beta, S, lambda = 1.0) {
   denom <- as.numeric(1.0 + crossprod(x, Sx))
   S_new <- (S - tcrossprod(Sx) / denom) / lambda
   gain  <- Sx / (lambda * denom)          # Kalman gain: S_new %*% x in O(p)
-  eps   <- as.numeric(y - crossprod(x, beta))
+  eps   <- as.numeric(y - crossprod(x, beta)) - offset
   list(beta = beta + gain * eps, S = S_new)
 }
 
@@ -74,6 +76,9 @@ rls_update <- function(x, y, beta, S, lambda = 1.0) {
 #'   early convergence. Default `100`.
 #' @param beta_init Optional numeric vector of length `p`. Starting coefficient
 #'   vector. Defaults to zero.
+#' @param offset Optional numeric vector of length `n` added to the linear
+#'   predictor, or `NULL` (no offset). Typical use: `log(exposure)` in
+#'   Poisson rate models.
 #'
 #' @return A `stream_fit` object with elements:
 #'   \describe{
@@ -97,7 +102,8 @@ rls_update <- function(x, y, beta, S, lambda = 1.0) {
 #' }
 #'
 #' @export
-rls_fit <- function(X, y, lambda = 1.0, S0_scale = 100.0, beta_init = NULL) {
+rls_fit <- function(X, y, lambda = 1.0, S0_scale = 100.0, beta_init = NULL,
+                    offset = NULL) {
   if (nrow(X) != length(y))
     stop("nrow(X) must equal length(y)")
   if (!is.numeric(lambda) || length(lambda) != 1 || lambda <= 0 || lambda > 1)
@@ -106,22 +112,28 @@ rls_fit <- function(X, y, lambda = 1.0, S0_scale = 100.0, beta_init = NULL) {
     stop("'S0_scale' must be a positive scalar")
   if (!is.null(beta_init) && length(beta_init) != ncol(X))
     stop("length of 'beta_init' must equal ncol(X)")
+  if (!is.null(offset)) {
+    if (!is.numeric(offset) || length(offset) != nrow(X))
+      stop("'offset' must be a numeric vector of length n, or NULL")
+  }
   cl   <- match.call()
   n    <- nrow(X); p <- ncol(X)
   beta <- if (is.null(beta_init)) numeric(p) else beta_init
   S    <- S0_scale * diag(p)
   path <- matrix(NA_real_, nrow = n, ncol = p)
   rss  <- 0.0
+  has_offset <- !is.null(offset)
   for (i in seq_len(n)) {
-    x_i   <- X[i, ]
+    x_i      <- X[i, ]
+    offset_i <- if (has_offset) offset[i] else 0
     Sx    <- as.vector(S %*% x_i)
     denom <- as.numeric(1.0 + crossprod(x_i, Sx))
     S     <- (S - tcrossprod(Sx) / denom) / lambda
     gain  <- Sx / (lambda * denom)
-    eps   <- y[i] - as.numeric(crossprod(x_i, beta))
+    eps   <- y[i] - as.numeric(crossprod(x_i, beta)) - offset_i
     beta  <- beta + gain * eps
     path[i, ] <- beta
-    rss   <- rss + (y[i] - as.numeric(crossprod(x_i, beta)))^2
+    rss   <- rss + (y[i] - as.numeric(crossprod(x_i, beta)) - offset_i)^2
   }
   new_stream_fit(
     beta        = beta,

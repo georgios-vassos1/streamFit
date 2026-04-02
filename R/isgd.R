@@ -23,6 +23,8 @@
 #' @param beta Numeric vector of length `p`. Current coefficient estimate.
 #' @param gamma Positive scalar. Learning rate for this step.
 #' @param family An R `family` object.
+#' @param offset Numeric scalar offset added to the linear predictor.
+#'   Typical use: `log(exposure)` in Poisson rate models. Default `0`.
 #'
 #' @return Updated coefficient vector (length `p`).
 #'
@@ -47,12 +49,12 @@
 #' }
 #'
 #' @export
-isgd_update <- function(x, y, beta, gamma, family) {
+isgd_update <- function(x, y, beta, gamma, family, offset = 0) {
   if (!is.numeric(gamma) || length(gamma) != 1 || gamma <= 0)
     stop("'gamma' must be a positive scalar")
   if (length(x) != length(beta))
     stop("length of 'x' must equal length of 'beta'")
-  eta     <- as.numeric(crossprod(x, beta))
+  eta     <- as.numeric(crossprod(x, beta)) + offset
   mu      <- family$linkinv(eta)
   r       <- gamma * (y - mu)
   if (abs(r) < .Machine$double.eps) return(beta)
@@ -94,6 +96,9 @@ isgd_update <- function(x, y, beta, gamma, family) {
 #' @param compute_vcov Logical. If `TRUE`, accumulate the sandwich covariance
 #'   matrices `A_hat` and `B_hat` needed for asymptotic inference (Toulis &
 #'   Airoldi, 2017). Adds `O(p^2)` cost per step. Default `TRUE`.
+#' @param offset Optional numeric vector of length `n` added to the linear
+#'   predictor, or `NULL` (no offset). Typical use: `log(exposure)` in
+#'   Poisson rate models.
 #'
 #' @return A `stream_fit` object (without `S`, which iSGD does not maintain).
 #'
@@ -117,18 +122,23 @@ isgd_update <- function(x, y, beta, gamma, family) {
 #'
 #' @export
 isgd_fit <- function(X, y, family = stats::gaussian(), gamma1 = 1.0, alpha = 0.7,
-                     compute_vcov = TRUE) {
+                     compute_vcov = TRUE, offset = NULL) {
   if (nrow(X) != length(y))
     stop("nrow(X) must equal length(y)")
   if (!is.numeric(gamma1) || length(gamma1) != 1 || gamma1 <= 0)
     stop("'gamma1' must be a positive scalar")
   if (!is.numeric(alpha) || alpha <= 0.5 || alpha > 1)
     stop("'alpha' must be in (0.5, 1]")
+  if (!is.null(offset)) {
+    if (!is.numeric(offset) || length(offset) != nrow(X))
+      stop("'offset' must be a numeric vector of length n, or NULL")
+  }
   cl     <- match.call()
   n      <- nrow(X); p <- ncol(X)
   beta   <- numeric(p)
   gammas <- gamma1 * seq_len(n)^(-alpha)
   path   <- matrix(NA_real_, nrow = n, ncol = p)
+  has_offset <- !is.null(offset)
   if (compute_vcov) {
     A_hat <- matrix(0.0, p, p)
     B_hat <- matrix(0.0, p, p)
@@ -138,8 +148,9 @@ isgd_fit <- function(X, y, family = stats::gaussian(), gamma1 = 1.0, alpha = 0.7
   variance <- family$variance
   is_gaussian <- (family$family == "gaussian")
   for (i in seq_len(n)) {
-    x_i     <- X[i, ]
-    eta_i   <- as.numeric(crossprod(x_i, beta))
+    x_i      <- X[i, ]
+    offset_i <- if (has_offset) offset[i] else 0
+    eta_i   <- as.numeric(crossprod(x_i, beta)) + offset_i
     mu_i    <- linkinv(eta_i)
     if (compute_vcov) {
       dmu_i   <- mu.eta(eta_i)

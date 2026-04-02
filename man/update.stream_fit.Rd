@@ -2,7 +2,7 @@
 \alias{update.stream_fit}
 \title{Update a \code{stream_fit} object with a new observation}
 \usage{
-\method{update}{stream_fit}(object, x, y, ...)
+\method{update}{stream_fit}(object, x, y, offset = 0, ...)
 }
 \arguments{
 \item{object}{A \code{stream_fit} object produced by \code{rls_fit()},
@@ -10,6 +10,8 @@
 \item{x}{Numeric vector of length \code{p}. Feature vector for the new
 observation.}
 \item{y}{Scalar response.}
+\item{offset}{Numeric scalar offset added to the linear predictor.
+Typical use: \code{log(exposure)} in Poisson rate models. Default \code{0}.}
 \item{...}{Ignored.}
 }
 \value{

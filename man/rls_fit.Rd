@@ -2,7 +2,7 @@
 \alias{rls_fit}
 \title{Fit RLS over a dataset (linear / Gaussian model)}
 \usage{
-rls_fit(X, y, lambda = 1, S0_scale = 100, beta_init = NULL)
+rls_fit(X, y, lambda = 1, S0_scale = 100, beta_init = NULL, offset = NULL)
 }
 \arguments{
 \item{X}{Numeric matrix \code{n x p}. Design matrix (include a column of ones
@@ -13,6 +13,9 @@ for an intercept).}
 \code{S0_scale * diag(p)}. Default \code{100}.}
 \item{beta_init}{Optional numeric vector of length \code{p}. Starting coefficient
 vector. Defaults to zero.}
+\item{offset}{Optional numeric vector of length \code{n} added to the linear
+predictor, or \code{NULL} (no offset). Typical use: \code{log(exposure)} in
+Poisson rate models.}
 }
 \value{
 A \code{stream_fit} object with elements:

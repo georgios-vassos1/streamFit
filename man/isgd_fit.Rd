@@ -3,7 +3,7 @@
 \title{Fit iSGD over a dataset}
 \usage{
 isgd_fit(X, y, family = stats::gaussian(), gamma1 = 1, alpha = 0.7,
-         compute_vcov = TRUE)
+         compute_vcov = TRUE, offset = NULL)
 }
 \arguments{
 \item{X}{Numeric matrix \code{n x p}. Design matrix.}
@@ -15,6 +15,9 @@ isgd_fit(X, y, family = stats::gaussian(), gamma1 = 1, alpha = 0.7,
   matrices \code{A_hat} and \code{B_hat} needed for asymptotic inference
   (Toulis & Airoldi, 2017). Adds \code{O(p^2)} cost per step.
   Default \code{TRUE}.}
+\item{offset}{Optional numeric vector of length \code{n} added to the linear
+predictor, or \code{NULL} (no offset). Typical use: \code{log(exposure)} in
+Poisson rate models.}
 }
 \value{
 A \code{stream_fit} object (without \code{S}, which iSGD does not maintain).

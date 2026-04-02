@@ -2,7 +2,7 @@
 \alias{isgd_update}
 \title{Single-step implicit SGD update}
 \usage{
-isgd_update(x, y, beta, gamma, family)
+isgd_update(x, y, beta, gamma, family, offset = 0)
 }
 \arguments{
 \item{x}{Numeric vector of length \code{p}. Feature vector.}
@@ -10,6 +10,8 @@ isgd_update(x, y, beta, gamma, family)
 \item{beta}{Numeric vector of length \code{p}. Current coefficient estimate.}
 \item{gamma}{Positive scalar. Learning rate for this step.}
 \item{family}{An R \code{family} object.}
+\item{offset}{Numeric scalar offset added to the linear predictor.
+Typical use: \code{log(exposure)} in Poisson rate models. Default \code{0}.}
 }
 \value{
 Updated coefficient vector (length \code{p}).

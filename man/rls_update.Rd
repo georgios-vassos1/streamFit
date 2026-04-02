@@ -2,7 +2,7 @@
 \alias{rls_update}
 \title{Single-step RLS update (linear / Gaussian model)}
 \usage{
-rls_update(x, y, beta, S, lambda = 1)
+rls_update(x, y, beta, S, lambda = 1, offset = 0)
 }
 \arguments{
 \item{x}{Numeric vector of length \code{p}. Feature vector for the current
@@ -12,6 +12,8 @@ observation.}
 \item{S}{Numeric matrix \code{p x p}. Current inverse covariance matrix.}
 \item{lambda}{Forgetting factor in \code{(0, 1]}. Default \code{1} (no forgetting).
 Effective memory window: \code{1 / (1 - lambda)}.}
+\item{offset}{Numeric scalar offset added to the linear predictor.
+Typical use: \code{log(exposure)} in Poisson rate models. Default \code{0}.}
 }
 \value{
 A list with:

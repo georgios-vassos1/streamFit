@@ -304,15 +304,20 @@ plot.stream_fit <- function(x, ref = NULL, coef_index = NULL, ...) {
 #'   same number of columns as the training design matrix.
 #' @param type Character string: \code{"response"} (default) returns
 #'   \code{g^{-1}(X \%*\% beta)}; \code{"link"} returns \code{X \%*\% beta}.
+#' @param offset Optional numeric vector of length \code{nrow(newdata)} added
+#'   to the linear predictor, or \code{NULL} (no offset). Typical use:
+#'   \code{log(exposure)} in Poisson rate models.
 #' @param ... Ignored.
 #' @return Numeric vector of length \code{nrow(newdata)}.
 #' @export
-predict.stream_fit <- function(object, newdata, type = c("response", "link"), ...) {
+predict.stream_fit <- function(object, newdata, type = c("response", "link"),
+                               offset = NULL, ...) {
   type <- match.arg(type)
   if (!is.matrix(newdata)) newdata <- as.matrix(newdata)
   if (ncol(newdata) != length(object$beta))
     stop("ncol(newdata) must equal the number of fitted coefficients")
   eta <- as.vector(newdata %*% object$beta)
+  if (!is.null(offset)) eta <- eta + offset
   if (type == "link") return(eta)
   if (!is.null(object$family)) object$family$linkinv(eta) else eta
 }
@@ -329,6 +334,8 @@ predict.stream_fit <- function(object, newdata, type = c("response", "link"), ..
 #' @param x Numeric vector of length \code{p}. Feature vector for the new
 #'   observation.
 #' @param y Scalar response.
+#' @param offset Numeric scalar offset added to the linear predictor.
+#'   Typical use: \code{log(exposure)} in Poisson rate models. Default \code{0}.
 #' @param ... Ignored.
 #' @return An updated \code{stream_fit} object. Note: \code{beta_path} is
 #'   \strong{not} extended (to avoid O(n^2) copy cost); only \code{beta} and
@@ -352,17 +359,18 @@ predict.stream_fit <- function(object, newdata, type = c("response", "link"), ..
 #' round(coef(fit), 3)
 #' }
 #' @export
-update.stream_fit <- function(object, x, y, ...) {
+update.stream_fit <- function(object, x, y, offset = 0, ...) {
   if (length(x) != length(object$beta))
     stop("length of 'x' must equal the number of fitted coefficients")
   hp <- object$hyperparams
   switch(object$method,
     RLS = {
-      out <- rls_update(x, y, object$beta, object$S, lambda = hp$lambda)
+      out <- rls_update(x, y, object$beta, object$S, lambda = hp$lambda,
+                        offset = offset)
       object$beta <- out$beta
       object$S    <- out$S
       if (!is.null(object$rss)) {
-        object$rss   <- object$rss + (y - as.numeric(crossprod(x, out$beta)))^2
+        object$rss   <- object$rss + (y - as.numeric(crossprod(x, out$beta)) - offset)^2
         object$n_obs <- object$n_obs + 1L
       }
     },
@@ -370,12 +378,13 @@ update.stream_fit <- function(object, x, y, ...) {
       out <- rls_glm_update(x, y, object$beta, object$S, object$family,
                             lambda     = hp$lambda,
                             eta_clip   = hp$eta_clip,
-                            score_clip = hp$score_clip)
+                            score_clip = hp$score_clip,
+                            offset     = offset)
       object$beta <- out$beta
       object$S    <- out$S
       if (!is.null(object$n_obs)) object$n_obs <- object$n_obs + 1L
       if (!is.null(object$pearson_ss)) {
-        eta_new <- pmin(pmax(as.numeric(crossprod(x, out$beta)),
+        eta_new <- pmin(pmax(as.numeric(crossprod(x, out$beta)) + offset,
                              -hp$eta_clip), hp$eta_clip)
         mu_new  <- object$family$linkinv(eta_new)
         V_new   <- object$family$variance(mu_new)
@@ -388,7 +397,7 @@ update.stream_fit <- function(object, x, y, ...) {
       gamma <- hp$gamma1 * t^(-hp$alpha)
       ## Accumulate sandwich matrices before updating beta
       if (!is.null(object$A_hat)) {
-        eta_pre <- as.numeric(crossprod(x, object$beta))
+        eta_pre <- as.numeric(crossprod(x, object$beta)) + offset
         mu      <- object$family$linkinv(eta_pre)
         dmu     <- object$family$mu.eta(eta_pre)
         V_mu    <- object$family$variance(mu)
@@ -403,7 +412,8 @@ update.stream_fit <- function(object, x, y, ...) {
       } else {
         object$n_obs <- object$n_obs + 1L
       }
-      object$beta <- isgd_update(x, y, object$beta, gamma, object$family)
+      object$beta <- isgd_update(x, y, object$beta, gamma, object$family,
+                                 offset = offset)
     },
     stop("update.stream_fit: unknown method '", object$method, "'")
   )

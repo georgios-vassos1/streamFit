@@ -3,7 +3,7 @@
 \title{Fit RLS-GLM over a dataset}
 \usage{
 rls_glm_fit(X, y, family = stats::gaussian(), lambda = 1, S0_scale = 100,
-  eta_clip = 10, beta_init = NULL, score_clip = NULL)
+  eta_clip = 10, beta_init = NULL, score_clip = NULL, offset = NULL)
 }
 \arguments{
 \item{X}{Numeric matrix \code{n x p}. Design matrix.}
@@ -15,6 +15,9 @@ rls_glm_fit(X, y, family = stats::gaussian(), lambda = 1, S0_scale = 100,
 \item{eta_clip}{Positive scalar. Linear predictor clipping bound. Default \code{10}.}
 \item{beta_init}{Optional numeric vector of length \code{p}. Starting coefficients.}
 \item{score_clip}{Optional positive scalar. Score clipping bound.}
+\item{offset}{Optional numeric vector of length \code{n} added to the linear
+predictor, or \code{NULL} (no offset). Typical use: \code{log(exposure)} in
+Poisson rate models.}
 }
 \value{
 A \code{stream_fit} object.

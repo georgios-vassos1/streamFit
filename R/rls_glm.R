@@ -26,6 +26,8 @@
 #' @param score_clip Optional positive scalar. Clamps the score contribution
 #'   `s_t` to `[-score_clip, score_clip]`. Recommended for unbounded response
 #'   families (Poisson, Gamma). Natural scale: `k * sqrt(V(mu))`, `k = 5`.
+#' @param offset Numeric scalar offset added to the linear predictor.
+#'   Typical use: `log(exposure)` in Poisson rate models. Default `0`.
 #'
 #' @return A list with:
 #'   \describe{
@@ -52,7 +54,7 @@
 #' @export
 rls_glm_update <- function(x, y, beta, S, family,
                             lambda = 1.0, eta_clip = 10.0,
-                            score_clip = NULL) {
+                            score_clip = NULL, offset = 0) {
   if (!is.numeric(lambda) || length(lambda) != 1 || lambda <= 0 || lambda > 1)
     stop("'lambda' must be a scalar in (0, 1]")
   if (length(x) != length(beta))
@@ -64,7 +66,7 @@ rls_glm_update <- function(x, y, beta, S, family,
   if (!is.null(score_clip) &&
       (!is.numeric(score_clip) || length(score_clip) != 1 || score_clip <= 0))
     stop("'score_clip' must be a positive scalar")
-  eta  <- pmin(pmax(as.numeric(crossprod(x, beta)), -eta_clip), eta_clip)
+  eta  <- pmin(pmax(as.numeric(crossprod(x, beta)) + offset, -eta_clip), eta_clip)
   mu   <- family$linkinv(eta)
   dmu  <- family$mu.eta(eta)
   vmu  <- family$variance(mu)
@@ -102,6 +104,9 @@ rls_glm_update <- function(x, y, beta, S, family,
 #'   For Poisson, `c(log(mean(y)), rep(0, p - 1))` avoids large early residuals.
 #' @param score_clip Optional positive scalar. Score clipping bound.
 #'   For Poisson a natural scale is `5 * sqrt(mean(y))`.
+#' @param offset Optional numeric vector of length `n` added to the linear
+#'   predictor, or `NULL` (no offset). Typical use: `log(exposure)` in
+#'   Poisson rate models.
 #'
 #' @return A `stream_fit` object.
 #'
@@ -123,7 +128,7 @@ rls_glm_update <- function(x, y, beta, S, family,
 rls_glm_fit <- function(X, y, family = stats::gaussian(),
                          lambda = 1.0, S0_scale = 100.0,
                          eta_clip = 10.0, beta_init = NULL,
-                         score_clip = NULL) {
+                         score_clip = NULL, offset = NULL) {
   if (nrow(X) != length(y))
     stop("nrow(X) must equal length(y)")
   if (!is.numeric(lambda) || length(lambda) != 1 || lambda <= 0 || lambda > 1)
@@ -137,6 +142,10 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
   if (!is.null(score_clip) &&
       (!is.numeric(score_clip) || length(score_clip) != 1 || score_clip <= 0))
     stop("'score_clip' must be a positive scalar")
+  if (!is.null(offset)) {
+    if (!is.numeric(offset) || length(offset) != nrow(X))
+      stop("'offset' must be a numeric vector of length n, or NULL")
+  }
   cl   <- match.call()
   n    <- nrow(X); p <- ncol(X)
   beta <- if (is.null(beta_init)) numeric(p) else beta_init
@@ -146,11 +155,13 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
   mu.eta  <- family$mu.eta
   variance <- family$variance
   has_clip <- !is.null(score_clip)
+  has_offset <- !is.null(offset)
   needs_disp <- .needs_dispersion(family)
   pearson_ss <- if (needs_disp) 0.0 else NULL
   for (i in seq_len(n)) {
-    x_i   <- X[i, ]
-    eta   <- pmin(pmax(as.numeric(crossprod(x_i, beta)), -eta_clip), eta_clip)
+    x_i      <- X[i, ]
+    offset_i <- if (has_offset) offset[i] else 0
+    eta   <- pmin(pmax(as.numeric(crossprod(x_i, beta)) + offset_i, -eta_clip), eta_clip)
     mu    <- linkinv(eta)
     dmu   <- mu.eta(eta)
     vmu   <- variance(mu)
@@ -164,7 +175,7 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
     beta  <- beta + gain * score
     path[i, ] <- beta
     if (needs_disp) {
-      eta_post <- pmin(pmax(as.numeric(crossprod(x_i, beta)), -eta_clip),
+      eta_post <- pmin(pmax(as.numeric(crossprod(x_i, beta)) + offset_i, -eta_clip),
                        eta_clip)
       mu_post  <- linkinv(eta_post)
       pearson_ss <- pearson_ss + (y[i] - mu_post)^2 / variance(mu_post)
