@@ -71,14 +71,15 @@ rls_glm_update <- function(x, y, beta, S, family,
   w    <- dmu^2 / vmu
 
   Sx    <- as.vector(S %*% x)
-  S_new <- (S - w * tcrossprod(Sx) /
-              as.numeric(1.0 + w * crossprod(x, Sx))) / lambda
+  denom <- as.numeric(1.0 + w * crossprod(x, Sx))
+  S_new <- (S - w * tcrossprod(Sx) / denom) / lambda
+  gain  <- Sx / (lambda * denom)           # Kalman gain: S_new %*% x in O(p)
 
   score <- (y - mu) * dmu / vmu
   if (!is.null(score_clip))
     score <- pmin(pmax(score, -score_clip), score_clip)
 
-  list(beta = beta + as.vector(S_new %*% x) * score, S = S_new)
+  list(beta = beta + gain * score, S = S_new)
 }
 
 
@@ -140,12 +141,25 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
   n    <- nrow(X); p <- ncol(X)
   beta <- if (is.null(beta_init)) numeric(p) else beta_init
   S    <- S0_scale * diag(p)
-  path <- matrix(NA_real_, nrow = n, ncol = p)
+  path    <- matrix(NA_real_, nrow = n, ncol = p)
+  linkinv <- family$linkinv
+  mu.eta  <- family$mu.eta
+  variance <- family$variance
+  has_clip <- !is.null(score_clip)
   for (i in seq_len(n)) {
-    out       <- rls_glm_update(X[i, ], y[i], beta, S, family,
-                                lambda, eta_clip, score_clip)
-    beta      <- out$beta
-    S         <- out$S
+    x_i   <- X[i, ]
+    eta   <- pmin(pmax(as.numeric(crossprod(x_i, beta)), -eta_clip), eta_clip)
+    mu    <- linkinv(eta)
+    dmu   <- mu.eta(eta)
+    vmu   <- variance(mu)
+    w     <- dmu^2 / vmu
+    Sx    <- as.vector(S %*% x_i)
+    denom <- as.numeric(1.0 + w * crossprod(x_i, Sx))
+    S     <- (S - w * tcrossprod(Sx) / denom) / lambda
+    gain  <- Sx / (lambda * denom)
+    score <- (y[i] - mu) * dmu / vmu
+    if (has_clip) score <- pmin(pmax(score, -score_clip), score_clip)
+    beta  <- beta + gain * score
     path[i, ] <- beta
   }
   new_stream_fit(
@@ -158,6 +172,7 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
     hyperparams = list(lambda     = lambda,
                        S0_scale   = S0_scale,
                        eta_clip   = eta_clip,
-                       score_clip = score_clip)
+                       score_clip = score_clip),
+    n_obs       = n
   )
 }

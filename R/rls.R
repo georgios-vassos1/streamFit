@@ -53,8 +53,9 @@ rls_update <- function(x, y, beta, S, lambda = 1.0) {
   Sx    <- as.vector(S %*% x)
   denom <- as.numeric(1.0 + crossprod(x, Sx))
   S_new <- (S - tcrossprod(Sx) / denom) / lambda
+  gain  <- Sx / (lambda * denom)          # Kalman gain: S_new %*% x in O(p)
   eps   <- as.numeric(y - crossprod(x, beta))
-  list(beta = beta + as.vector(S_new %*% x) * eps, S = S_new)
+  list(beta = beta + gain * eps, S = S_new)
 }
 
 
@@ -110,11 +111,17 @@ rls_fit <- function(X, y, lambda = 1.0, S0_scale = 100.0, beta_init = NULL) {
   beta <- if (is.null(beta_init)) numeric(p) else beta_init
   S    <- S0_scale * diag(p)
   path <- matrix(NA_real_, nrow = n, ncol = p)
+  rss  <- 0.0
   for (i in seq_len(n)) {
-    out       <- rls_update(X[i, ], y[i], beta, S, lambda)
-    beta      <- out$beta
-    S         <- out$S
+    x_i   <- X[i, ]
+    Sx    <- as.vector(S %*% x_i)
+    denom <- as.numeric(1.0 + crossprod(x_i, Sx))
+    S     <- (S - tcrossprod(Sx) / denom) / lambda
+    gain  <- Sx / (lambda * denom)
+    eps   <- y[i] - as.numeric(crossprod(x_i, beta))
+    beta  <- beta + gain * eps
     path[i, ] <- beta
+    rss   <- rss + (y[i] - as.numeric(crossprod(x_i, beta)))^2
   }
   new_stream_fit(
     beta        = beta,
@@ -123,6 +130,8 @@ rls_fit <- function(X, y, lambda = 1.0, S0_scale = 100.0, beta_init = NULL) {
     family      = stats::gaussian(),
     method      = "RLS",
     call        = cl,
-    hyperparams = list(lambda = lambda, S0_scale = S0_scale)
+    hyperparams = list(lambda = lambda, S0_scale = S0_scale),
+    rss         = rss,
+    n_obs       = n
   )
 }
