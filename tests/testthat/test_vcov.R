@@ -720,3 +720,142 @@ test_that("confint width ratio approximates sqrt(n1/n2) for 10x more data", {
                            collapse = ", "),
                            "expected ~", round(expected_ratio, 2)))
 })
+
+
+# -------------------------------------------------------------------
+# Gamma: rls_glm_fit vs glm (estimated dispersion)
+# -------------------------------------------------------------------
+
+test_that("Gamma: coef(rls_glm) close to coef(glm)", {
+  set.seed(401)
+  n <- 5000; p <- 3
+  X <- cbind(1, matrix(rnorm(n * (p - 1), sd = 0.3), n, p - 1))
+  beta_true <- c(1.0, 0.3, -0.2)
+  y <- rgamma(n, shape = 5, rate = 5 / exp(X %*% beta_true))
+  fit <- rls_glm_fit(X, y, family = Gamma(link = "log"),
+                     beta_init = c(log(mean(y)), rep(0, p - 1)),
+                     score_clip = 5, S0_scale = 1)
+  fit_glm <- glm(y ~ X[, -1], family = Gamma(link = "log"))
+  expect_equal(as.numeric(coef(fit)), as.numeric(coef(fit_glm)),
+               tolerance = 0.05)
+})
+
+test_that("Gamma: vcov(rls_glm) matches vcov(glm) (full matrix)", {
+  set.seed(402)
+  n <- 5000; p <- 3
+  X <- cbind(1, matrix(rnorm(n * (p - 1), sd = 0.3), n, p - 1))
+  y <- rgamma(n, shape = 5, rate = 5 / exp(X %*% c(1, 0.3, -0.2)))
+  V_online <- vcov(rls_glm_fit(X, y, family = Gamma(link = "log"),
+                                beta_init = c(log(mean(y)), rep(0, p - 1)),
+                                score_clip = 5, S0_scale = 1))
+  V_glm <- vcov(glm(y ~ X[, -1], family = Gamma(link = "log")))
+  expect_equal(unname(V_online), unname(V_glm), tolerance = 0.15)
+})
+
+test_that("Gamma: summary(rls_glm) matches summary(glm) coefficient table", {
+  set.seed(403)
+  n <- 5000; p <- 3
+  X <- cbind(1, matrix(rnorm(n * (p - 1), sd = 0.3), n, p - 1))
+  y <- rgamma(n, shape = 5, rate = 5 / exp(X %*% c(1, 0.3, -0.2)))
+  s_online <- summary(rls_glm_fit(X, y, family = Gamma(link = "log"),
+                                   beta_init = c(log(mean(y)), rep(0, p - 1)),
+                                   score_clip = 5, S0_scale = 1))
+  s_glm <- summary(glm(y ~ X[, -1], family = Gamma(link = "log")))
+  se_online <- s_online$coefficients[, "Std. Error"]
+  se_glm    <- s_glm$coefficients[, "Std. Error"]
+  expect_true(all(abs(se_online - se_glm) / se_glm < 0.15))
+  ## Gamma has estimated dispersion → both must use t-values
+  expect_true("t value" %in% colnames(s_online$coefficients))
+  expect_true("t value" %in% colnames(s_glm$coefficients))
+  ## t-values within 15%
+  t_online <- abs(s_online$coefficients[, "t value"])
+  t_glm    <- abs(s_glm$coefficients[, "t value"])
+  expect_true(all(abs(t_online - t_glm) / t_glm < 0.15))
+})
+
+test_that("Gamma: confint uses qt (not qnorm)", {
+  set.seed(404)
+  n <- 2000; p <- 2
+  X <- cbind(1, rnorm(n, sd = 0.3))
+  y <- rgamma(n, shape = 5, rate = 5 / exp(X %*% c(1, 0.3)))
+  fit <- rls_glm_fit(X, y, family = Gamma(link = "log"),
+                     beta_init = c(log(mean(y)), 0), score_clip = 5,
+                     S0_scale = 1)
+  ci <- confint(fit, level = 0.95)
+  se <- sqrt(diag(vcov(fit)))
+  q_t <- qt(0.975, df = n - p)
+  q_z <- qnorm(0.975)
+  ## Must use t, which is wider than z
+  expect_equal(unname(ci[, 1]), fit$beta - q_t * se, tolerance = 1e-12)
+  expect_true(q_t > q_z)
+})
+
+
+# -------------------------------------------------------------------
+# Negative Binomial: rls_glm_fit vs glm (known dispersion)
+# -------------------------------------------------------------------
+
+test_that("NB: coef(rls_glm) close to coef(glm)", {
+  skip_if_not_installed("MASS")
+  set.seed(411)
+  n <- 5000; p <- 3; theta <- 3
+  X <- cbind(1, matrix(rnorm(n * (p - 1), sd = 0.3), n, p - 1))
+  beta_true <- c(1.0, 0.3, -0.2)
+  y <- MASS::rnegbin(n, mu = exp(X %*% beta_true), theta = theta)
+  fam <- MASS::negative.binomial(theta = theta)
+  fit <- rls_glm_fit(X, y, family = fam,
+                     beta_init = c(log(mean(y)), rep(0, p - 1)),
+                     score_clip = 5, S0_scale = 1)
+  fit_glm <- glm(y ~ X[, -1], family = fam)
+  expect_equal(as.numeric(coef(fit)), as.numeric(coef(fit_glm)),
+               tolerance = 0.05)
+})
+
+test_that("NB: vcov(rls_glm) matches vcov(glm) (full matrix)", {
+  skip_if_not_installed("MASS")
+  set.seed(412)
+  n <- 5000; p <- 3; theta <- 3
+  X <- cbind(1, matrix(rnorm(n * (p - 1), sd = 0.3), n, p - 1))
+  y <- MASS::rnegbin(n, mu = exp(X %*% c(1, 0.3, -0.2)), theta = theta)
+  fam <- MASS::negative.binomial(theta = theta)
+  V_online <- vcov(rls_glm_fit(X, y, family = fam,
+                                beta_init = c(log(mean(y)), rep(0, p - 1)),
+                                score_clip = 5, S0_scale = 1))
+  V_glm <- vcov(glm(y ~ X[, -1], family = fam))
+  expect_equal(unname(V_online), unname(V_glm), tolerance = 0.15)
+})
+
+test_that("NB: summary(rls_glm) matches summary(glm) coefficient table", {
+  skip_if_not_installed("MASS")
+  set.seed(413)
+  n <- 5000; p <- 3; theta <- 3
+  X <- cbind(1, matrix(rnorm(n * (p - 1), sd = 0.3), n, p - 1))
+  y <- MASS::rnegbin(n, mu = exp(X %*% c(1, 0.3, -0.2)), theta = theta)
+  fam <- MASS::negative.binomial(theta = theta)
+  s_online <- summary(rls_glm_fit(X, y, family = fam,
+                                   beta_init = c(log(mean(y)), rep(0, p - 1)),
+                                   score_clip = 5, S0_scale = 1))
+  s_glm <- summary(glm(y ~ X[, -1], family = fam))
+  se_online <- s_online$coefficients[, "Std. Error"]
+  se_glm    <- s_glm$coefficients[, "Std. Error"]
+  expect_true(all(abs(se_online - se_glm) / se_glm < 0.15))
+  ## streamFit treats NB (known theta) as known-dispersion → z-values.
+  ## R's summary.glm uses t-values for NB (not in its binomial/Poisson
+  ## allowlist), but its estimated dispersion ≈ 1, so the SEs match.
+  expect_true("z value" %in% colnames(s_online$coefficients))
+})
+
+test_that("NB: confint(rls_glm) close to confint.default(glm)", {
+  skip_if_not_installed("MASS")
+  set.seed(414)
+  n <- 5000; p <- 3; theta <- 3
+  X <- cbind(1, matrix(rnorm(n * (p - 1), sd = 0.3), n, p - 1))
+  y <- MASS::rnegbin(n, mu = exp(X %*% c(1, 0.3, -0.2)), theta = theta)
+  fam <- MASS::negative.binomial(theta = theta)
+  ci_online <- confint(rls_glm_fit(X, y, family = fam,
+                                    beta_init = c(log(mean(y)), rep(0, p - 1)),
+                                    score_clip = 5, S0_scale = 1),
+                       level = 0.95)
+  ci_glm <- confint.default(glm(y ~ X[, -1], family = fam), level = 0.95)
+  expect_equal(unname(ci_online), unname(ci_glm), tolerance = 0.10)
+})

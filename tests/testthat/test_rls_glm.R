@@ -113,3 +113,28 @@ test_that("print.stream_fit handles NULL score_clip without error (regression)",
   fit <- rls_glm_fit(X, y, family = binomial(), score_clip = NULL)
   expect_output(print(fit), "Stream fit")
 })
+
+
+# -------------------------------------------------------------------
+# Gamma: streaming pearson_ss accumulation
+# -------------------------------------------------------------------
+
+test_that("update.stream_fit: Gamma streaming matches full batch", {
+  set.seed(54)
+  n <- 500; p <- 2
+  X <- cbind(1, rnorm(n, sd = 0.3))
+  y <- rgamma(n, shape = 5, rate = 5 / exp(X %*% c(1, 0.2)))
+  fam <- Gamma(link = "log")
+  b0 <- c(log(mean(y)), 0)
+  fit_full <- rls_glm_fit(X, y, family = fam,
+                          beta_init = b0,
+                          score_clip = 5, S0_scale = 1)
+  n_init <- 300
+  fit <- rls_glm_fit(X[1:n_init, ], y[1:n_init], family = fam,
+                     beta_init = b0,
+                     score_clip = 5, S0_scale = 1)
+  for (i in (n_init + 1):n)
+    fit <- update(fit, x = X[i, ], y = y[i])
+  expect_equal(fit$beta, fit_full$beta, tolerance = 1e-10)
+  expect_equal(fit$pearson_ss, fit_full$pearson_ss, tolerance = 1e-8)
+})
