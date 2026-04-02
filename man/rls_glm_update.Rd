@@ -3,7 +3,7 @@
 \title{Single-step RLS-GLM update}
 \usage{
 rls_glm_update(x, y, beta, S, family, lambda = 1, eta_clip = 10,
-  score_clip = NULL, offset = 0)
+  score_clip = NULL, offset = 0, S_max = NULL)
 }
 \arguments{
 \item{x}{Numeric vector of length \code{p}. Feature vector.}
@@ -18,6 +18,12 @@ rls_glm_update(x, y, beta, S, family, lambda = 1, eta_clip = 10,
 \item{score_clip}{Optional positive scalar. Clamps the score contribution.}
 \item{offset}{Numeric scalar offset added to the linear predictor.
 Typical use: \code{log(exposure)} in Poisson rate models. Default \code{0}.}
+\item{S_max}{Optional positive scalar. Upper bound for diagonal elements
+of \code{S}. After each update, any diagonal entry exceeding \code{S_max} is
+rescaled (along with its row and column) back to \code{S_max}. This prevents
+covariance windup when \code{lambda < 1} and the design matrix has sparse
+indicator columns (e.g. interval dummies in piecewise-exponential models).
+Default \code{NULL} (no clamping).}
 }
 \value{
 A list with:

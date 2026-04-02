@@ -28,6 +28,12 @@
 #'   families (Poisson, Gamma). Natural scale: `k * sqrt(V(mu))`, `k = 5`.
 #' @param offset Numeric scalar offset added to the linear predictor.
 #'   Typical use: `log(exposure)` in Poisson rate models. Default `0`.
+#' @param S_max Optional positive scalar. Upper bound for the diagonal
+#'   elements of `S`. After each update, any diagonal entry exceeding
+#'   `S_max` is rescaled (along with its row and column) back to `S_max`.
+#'   This prevents covariance windup when `lambda < 1` and the design
+#'   matrix has sparse indicator columns (e.g. interval dummies in
+#'   piecewise-exponential models). Default `NULL` (no clamping).
 #'
 #' @return A list with:
 #'   \describe{
@@ -54,7 +60,8 @@
 #' @export
 rls_glm_update <- function(x, y, beta, S, family,
                             lambda = 1.0, eta_clip = 10.0,
-                            score_clip = NULL, offset = 0) {
+                            score_clip = NULL, offset = 0,
+                            S_max = NULL) {
   if (!is.numeric(lambda) || length(lambda) != 1 || lambda <= 0 || lambda > 1)
     stop("'lambda' must be a scalar in (0, 1]")
   if (length(x) != length(beta))
@@ -66,6 +73,9 @@ rls_glm_update <- function(x, y, beta, S, family,
   if (!is.null(score_clip) &&
       (!is.numeric(score_clip) || length(score_clip) != 1 || score_clip <= 0))
     stop("'score_clip' must be a positive scalar")
+  if (!is.null(S_max) &&
+      (!is.numeric(S_max) || length(S_max) != 1 || S_max <= 0))
+    stop("'S_max' must be a positive scalar")
   eta  <- pmin(pmax(as.numeric(crossprod(x, beta)) + offset, -eta_clip), eta_clip)
   mu   <- family$linkinv(eta)
   dmu  <- family$mu.eta(eta)
@@ -76,6 +86,16 @@ rls_glm_update <- function(x, y, beta, S, family,
   denom <- as.numeric(1.0 + w * crossprod(x, Sx))
   S_new <- (S - w * tcrossprod(Sx) / denom) / lambda
   gain  <- Sx / (lambda * denom)           # Kalman gain: S_new %*% x in O(p)
+
+  ## S-diagonal clamping: prevent covariance windup for sparse designs
+  if (!is.null(S_max)) {
+    d_S  <- diag(S_new)
+    over <- d_S > S_max
+    if (any(over)) {
+      sf    <- ifelse(over, sqrt(S_max / d_S), 1.0)
+      S_new <- S_new * outer(sf, sf)
+    }
+  }
 
   score <- (y - mu) * dmu / vmu
   if (!is.null(score_clip))
@@ -107,6 +127,12 @@ rls_glm_update <- function(x, y, beta, S, family,
 #' @param offset Optional numeric vector of length `n` added to the linear
 #'   predictor, or `NULL` (no offset). Typical use: `log(exposure)` in
 #'   Poisson rate models.
+#' @param S_max Optional positive scalar. Upper bound for diagonal elements
+#'   of the inverse Fisher information `S`. After each update, any diagonal
+#'   entry exceeding `S_max` is rescaled (along with its row and column) back
+#'   to `S_max`. This prevents covariance windup when `lambda < 1` and the
+#'   design matrix has sparse indicator columns (e.g. interval dummies in
+#'   piecewise-exponential survival models). Default `NULL` (no clamping).
 #'
 #' @return A `stream_fit` object.
 #'
@@ -128,7 +154,8 @@ rls_glm_update <- function(x, y, beta, S, family,
 rls_glm_fit <- function(X, y, family = stats::gaussian(),
                          lambda = 1.0, S0_scale = 100.0,
                          eta_clip = 10.0, beta_init = NULL,
-                         score_clip = NULL, offset = NULL) {
+                         score_clip = NULL, offset = NULL,
+                         S_max = NULL) {
   if (nrow(X) != length(y))
     stop("nrow(X) must equal length(y)")
   if (!is.numeric(lambda) || length(lambda) != 1 || lambda <= 0 || lambda > 1)
@@ -146,6 +173,9 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
     if (!is.numeric(offset) || length(offset) != nrow(X))
       stop("'offset' must be a numeric vector of length n, or NULL")
   }
+  if (!is.null(S_max) &&
+      (!is.numeric(S_max) || length(S_max) != 1 || S_max <= 0))
+    stop("'S_max' must be a positive scalar")
   cl   <- match.call()
   n    <- nrow(X); p <- ncol(X)
   beta <- if (is.null(beta_init)) numeric(p) else beta_init
@@ -154,8 +184,9 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
   linkinv <- family$linkinv
   mu.eta  <- family$mu.eta
   variance <- family$variance
-  has_clip <- !is.null(score_clip)
+  has_clip   <- !is.null(score_clip)
   has_offset <- !is.null(offset)
+  has_S_max  <- !is.null(S_max)
   needs_disp <- .needs_dispersion(family)
   pearson_ss <- if (needs_disp) 0.0 else NULL
   for (i in seq_len(n)) {
@@ -170,6 +201,15 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
     denom <- as.numeric(1.0 + w * crossprod(x_i, Sx))
     S     <- (S - w * tcrossprod(Sx) / denom) / lambda
     gain  <- Sx / (lambda * denom)
+    ## S-diagonal clamping
+    if (has_S_max) {
+      d_S  <- diag(S)
+      over <- d_S > S_max
+      if (any(over)) {
+        sf <- ifelse(over, sqrt(S_max / d_S), 1.0)
+        S  <- S * outer(sf, sf)
+      }
+    }
     score <- (y[i] - mu) * dmu / vmu
     if (has_clip) score <- pmin(pmax(score, -score_clip), score_clip)
     beta  <- beta + gain * score
@@ -191,7 +231,8 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
     hyperparams = list(lambda     = lambda,
                        S0_scale   = S0_scale,
                        eta_clip   = eta_clip,
-                       score_clip = score_clip),
+                       score_clip = score_clip,
+                       S_max      = S_max),
     n_obs       = n,
     pearson_ss  = pearson_ss
   )

@@ -379,7 +379,8 @@ update.stream_fit <- function(object, x, y, offset = 0, ...) {
                             lambda     = hp$lambda,
                             eta_clip   = hp$eta_clip,
                             score_clip = hp$score_clip,
-                            offset     = offset)
+                            offset     = offset,
+                            S_max      = hp$S_max)
       object$beta <- out$beta
       object$S    <- out$S
       if (!is.null(object$n_obs)) object$n_obs <- object$n_obs + 1L

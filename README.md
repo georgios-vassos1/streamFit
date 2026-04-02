@@ -9,11 +9,13 @@ or adaptive learning rate for tracking **time-varying parameters**.
 
 | Algorithm | Cost / step | Storage | Notes |
 |-----------|-------------|---------|-------|
-| RLS-GLM   | O(p²)       | O(p²)   | Second-order; Sherman-Morrison Fisher update |
+| RLS-GLM   | O(p^2)      | O(p^2)  | Second-order; Sherman-Morrison Fisher update |
 | iSGD      | O(p)        | O(p)    | First-order; implicit proximal update |
 
-The package is designed for extension to other streaming estimation problems
-(survival models, state-space models, etc.).
+On top of these core estimators, `streamFit` provides a **piecewise-exponential
+Cox model** layer (`pe_cox_fit` / `pe_cox_update`) that recasts survival
+analysis as a Poisson GLM with offset, enabling fully online estimation of
+hazard ratios and baseline hazards.
 
 ---
 
@@ -69,20 +71,22 @@ lines(conv_path(fit_isgd$beta_path, beta0), col = "tomato")
 
 ```r
 # Single-step update
-out <- rls_update(x, y, beta, S, lambda = 1)
-# out$beta  — updated coefficients
-# out$S     — updated inverse covariance
+out <- rls_update(x, y, beta, S, lambda = 1, offset = 0)
+# out$beta  -- updated coefficients
+# out$S     -- updated inverse covariance
 
 # Full dataset
-fit <- rls_fit(X, y, lambda = 1, S0_scale = 100, beta_init = NULL)
+fit <- rls_fit(X, y, lambda = 1, S0_scale = 100, beta_init = NULL,
+               offset = NULL)
 ```
 
 ### Generalised linear models
 
 ```r
-# Single-step update — works with any R family object
+# Single-step update -- works with any R family object
 out <- rls_glm_update(x, y, beta, S, family,
-                      lambda = 1, eta_clip = 10, score_clip = NULL)
+                      lambda = 1, eta_clip = 10, score_clip = NULL,
+                      offset = 0, S_max = NULL)
 
 # Full dataset
 fit <- rls_glm_fit(X, y, family = gaussian(),
@@ -90,19 +94,36 @@ fit <- rls_glm_fit(X, y, family = gaussian(),
                    S0_scale   = 100,     # initial inverse Fisher scale
                    eta_clip   = 10,      # linear predictor clipping
                    beta_init  = NULL,    # starting coefficients
-                   score_clip = NULL)    # score clipping (Poisson)
+                   score_clip = NULL,    # score clipping (Poisson)
+                   offset     = NULL,    # e.g. log(exposure)
+                   S_max      = NULL)    # covariance clamping bound
 ```
 
 ### Implicit SGD
 
 ```r
 # Single-step update
-beta <- isgd_update(x, y, beta, gamma, family)
+beta <- isgd_update(x, y, beta, gamma, family, offset = 0)
 
 # Full dataset
 fit <- isgd_fit(X, y, family = gaussian(),
                 gamma1 = 1,    # initial learning rate
-                alpha  = 0.7)  # decay exponent, must be in (0.5, 1]
+                alpha  = 0.7,  # decay exponent, must be in (0.5, 1]
+                offset = NULL)
+```
+
+### Piecewise-exponential Cox model
+
+```r
+# Expand survival data into person-interval records
+pe <- surv_to_pe(start, stop, status, X, breaks)
+
+# Fit an online Cox model (uses Poisson GLM with offset = log(exposure))
+fit <- pe_cox_fit(start, stop, status, X, breaks,
+                  method = "rls_glm", lambda = 1, ...)
+
+# Stream a single new observation
+fit <- pe_cox_update(fit, start_new, stop_new, status_new, x_new)
 ```
 
 ### Utilities
@@ -118,6 +139,10 @@ plot(d, type = "l")
 ```r
 print(fit)              # method, family, final coefficients, hyperparams
 coef(fit)               # final coefficient vector
+nobs(fit)               # number of observations processed
+vcov(fit)               # variance-covariance matrix of coefficients
+summary(fit)            # coefficient table with SEs, z/t values, p-values
+confint(fit)            # Wald confidence intervals
 plot(fit)               # coefficient paths over observations
 plot(fit, ref = beta0)  # L2 convergence to reference
 predict(fit, Xnew)      # predicted responses for new data
@@ -135,6 +160,24 @@ rls_glm_fit(X, y, family = binomial())   # logistic regression
 rls_glm_fit(X, y, family = poisson())    # Poisson regression
 rls_glm_fit(X, y, family = gaussian())   # linear regression (= rls_fit)
 rls_glm_fit(X, y, family = Gamma(link = "log"))
+```
+
+---
+
+## Offset support
+
+All fitting functions accept an `offset` parameter (a numeric vector of length
+`n` added to the linear predictor before applying the link). Common uses:
+
+```r
+# Poisson rate model with known exposure
+fit <- rls_glm_fit(X, y, family = poisson(), offset = log(exposure))
+
+# Streaming with offset
+fit <- update(fit, x = x_new, y = y_new, offset = log(exposure_new))
+
+# Prediction with offset
+predict(fit, Xnew, offset = log(exposure_new))
 ```
 
 ---
@@ -163,6 +206,21 @@ fit <- isgd_fit(X, y, family = binomial(),
                 alpha  = 0.51)  # slowest valid decay
 ```
 
+### S-diagonal clamping (`S_max`)
+
+When using `lambda < 1` with sparse design matrices (e.g. interval dummies in
+piecewise-exponential models), the inverse Fisher information `S` can blow up
+for parameters that are not regularly updated ("covariance windup"). The `S_max`
+parameter prevents this by clamping the diagonal of `S`:
+
+```r
+fit <- rls_glm_fit(X, y, family = poisson(),
+                   lambda = 0.99, S_max = 1.0)
+```
+
+After each update, any `diag(S)[j] > S_max` is rescaled symmetrically back to
+`S_max` while preserving the correlation structure.
+
 ---
 
 ## Poisson-specific notes
@@ -182,6 +240,48 @@ requires no special modification.
 
 ---
 
+## Online piecewise-exponential Cox model
+
+A Cox proportional hazards model with piecewise-constant baseline hazard can be
+recast as a Poisson GLM. `streamFit` provides three functions for this:
+
+- `surv_to_pe()` -- expands counting-process `(start, stop, status)` data into
+  person-interval records with interval dummies and `offset = log(exposure)`
+- `pe_cox_fit()` -- convenience wrapper that expands + fits in one call
+- `pe_cox_update()` -- streams a single new subject through the fitted model
+
+```r
+set.seed(42)
+n <- 500
+x1 <- rnorm(n); x2 <- rbinom(n, 1, 0.5)
+X <- cbind(x1, x2)
+T_event <- rexp(n, rate = 0.5 * exp(0.5 * x1 - 0.3 * x2))
+C <- runif(n, 2, 5)
+time <- pmin(T_event, C); status <- as.integer(T_event <= C)
+breaks <- seq(0, max(time) + 0.01, length.out = 6)
+
+# Batch fit
+fit <- pe_cox_fit(rep(0, n), time, status, X, breaks,
+                  method = "rls_glm", lambda = 1)
+fit$beta                  # covariate effects (log hazard-ratios)
+fit$baseline_log_hazard   # log baseline hazard per interval
+
+# Streaming with forgetting (tracks time-varying coefficients)
+fit <- pe_cox_fit(rep(0, 400), time[1:400], status[1:400],
+                  X[1:400, ], breaks,
+                  method = "rls_glm", lambda = 0.999, S_max = 1.0)
+for (i in 401:n) {
+  fit <- pe_cox_update(fit, 0, time[i], status[i], X[i, ])
+}
+fit$beta
+```
+
+With `lambda < 1`, the online estimator tracks time-varying regression
+coefficients, analogous to `timereg::timecox()` in batch mode. Use `S_max`
+to prevent covariance windup on the sparse interval-dummy columns.
+
+---
+
 ## Running the tests
 
 ```r
@@ -196,20 +296,6 @@ R CMD check --no-manual ~/streamFit
 
 ---
 
-## Extending the package
-
-To add a new estimator (e.g. a Cox model via the piecewise exponential
-reformulation), write a new file in `R/` that:
-
-1. Implements a single-step `*_update()` function.
-2. Implements a `*_fit()` function that loops over observations and calls
-   `new_stream_fit()` at the end.
-
-The `stream_fit` S3 class, `print`, `coef`, `plot`, `predict`, `update`,
-and `conv_path` are then available automatically.
-
----
-
 ## References
 
 - Fahrmeir, L. (1992). Posterior mode estimation by extended Kalman filtering
@@ -219,3 +305,7 @@ and `conv_path` are then available automatically.
   1694-1727.
 - Amari, S.-I. (1998). Natural gradient works efficiently in learning.
   *Neural Computation*, 10(2), 251-276.
+- Friedman, M. (1982). Piecewise exponential models for survival data with
+  covariates. *Annals of Statistics*, 10(1), 101-113.
+- Martinussen, T. and Scheike, T.H. (2006). *Dynamic Regression Models for
+  Survival Data*. Springer.

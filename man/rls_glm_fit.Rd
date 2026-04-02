@@ -3,7 +3,8 @@
 \title{Fit RLS-GLM over a dataset}
 \usage{
 rls_glm_fit(X, y, family = stats::gaussian(), lambda = 1, S0_scale = 100,
-  eta_clip = 10, beta_init = NULL, score_clip = NULL, offset = NULL)
+  eta_clip = 10, beta_init = NULL, score_clip = NULL, offset = NULL,
+  S_max = NULL)
 }
 \arguments{
 \item{X}{Numeric matrix \code{n x p}. Design matrix.}
@@ -18,6 +19,12 @@ rls_glm_fit(X, y, family = stats::gaussian(), lambda = 1, S0_scale = 100,
 \item{offset}{Optional numeric vector of length \code{n} added to the linear
 predictor, or \code{NULL} (no offset). Typical use: \code{log(exposure)} in
 Poisson rate models.}
+\item{S_max}{Optional positive scalar. Upper bound for diagonal elements
+of the inverse Fisher information \code{S}. After each update, any diagonal
+entry exceeding \code{S_max} is rescaled (along with its row and column) back
+to \code{S_max}. This prevents covariance windup when \code{lambda < 1} and the
+design matrix has sparse indicator columns (e.g. interval dummies in
+piecewise-exponential survival models). Default \code{NULL} (no clamping).}
 }
 \value{
 A \code{stream_fit} object.
