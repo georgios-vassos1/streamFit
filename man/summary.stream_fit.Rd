@@ -9,9 +9,11 @@
 \item{...}{Ignored.}
 }
 \value{
-Invisibly returns \code{object}.
+A \code{summary.stream_fit} object (invisibly) containing a coefficient
+table with standard errors, test statistics, and p-values.
 }
 \description{
-Summary method for objects of class \code{stream_fit}. Currently delegates
-to \code{\link{print.stream_fit}}.
+Produces a summary with coefficient table including standard errors,
+test statistics, and p-values. Uses t-values for RLS (Gaussian) and
+z-values for GLM methods.
 }

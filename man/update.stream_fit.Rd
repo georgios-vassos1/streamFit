@@ -13,8 +13,10 @@ observation.}
 \item{...}{Ignored.}
 }
 \value{
-An updated \code{stream_fit} object. The \code{beta_path} is
-extended by one row.
+An updated \code{stream_fit} object. Note: \code{beta_path} is
+\strong{not} extended (to avoid O(n^2) copy cost); only \code{beta} and
+the sufficient statistics (\code{S}, \code{rss}, \code{A_hat}, etc.) are
+updated.
 }
 \description{
 Processes a single new observation and returns an updated \code{stream_fit}
