@@ -146,6 +146,8 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
   mu.eta  <- family$mu.eta
   variance <- family$variance
   has_clip <- !is.null(score_clip)
+  needs_disp <- .needs_dispersion(family)
+  pearson_ss <- if (needs_disp) 0.0 else NULL
   for (i in seq_len(n)) {
     x_i   <- X[i, ]
     eta   <- pmin(pmax(as.numeric(crossprod(x_i, beta)), -eta_clip), eta_clip)
@@ -161,6 +163,12 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
     if (has_clip) score <- pmin(pmax(score, -score_clip), score_clip)
     beta  <- beta + gain * score
     path[i, ] <- beta
+    if (needs_disp) {
+      eta_post <- pmin(pmax(as.numeric(crossprod(x_i, beta)), -eta_clip),
+                       eta_clip)
+      mu_post  <- linkinv(eta_post)
+      pearson_ss <- pearson_ss + (y[i] - mu_post)^2 / variance(mu_post)
+    }
   }
   new_stream_fit(
     beta        = beta,
@@ -173,6 +181,7 @@ rls_glm_fit <- function(X, y, family = stats::gaussian(),
                        S0_scale   = S0_scale,
                        eta_clip   = eta_clip,
                        score_clip = score_clip),
-    n_obs       = n
+    n_obs       = n,
+    pearson_ss  = pearson_ss
   )
 }

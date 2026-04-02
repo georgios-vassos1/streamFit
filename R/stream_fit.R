@@ -1,3 +1,18 @@
+#' Check whether a family requires dispersion estimation
+#'
+#' Returns `TRUE` for families where the dispersion parameter phi is unknown
+#' and must be estimated (Gamma, inverse.gaussian, quasi families).
+#' Returns `FALSE` for families with known dispersion (binomial, Poisson,
+#' negative binomial).
+#'
+#' @param family An R `family` object.
+#' @return Logical scalar.
+#' @keywords internal
+.needs_dispersion <- function(family) {
+  grepl("^(Gamma|inverse\\.gaussian|quasi)", family$family)
+}
+
+
 #' Construct a `stream_fit` object
 #'
 #' Internal constructor used by [rls_fit()], [rls_glm_fit()], and [isgd_fit()].
@@ -13,13 +28,16 @@
 #' @param B_hat Average score outer-product matrix (`p x p`). iSGD only.
 #' @param rss Residual sum of squares (scalar). RLS only.
 #' @param n_obs Number of observations processed (integer).
+#' @param pearson_ss Cumulative Pearson sum of squares (scalar). RLS-GLM only,
+#'   for families that require dispersion estimation (Gamma, inverse.gaussian).
 #'
 #' @return An object of class `stream_fit`.
 #' @keywords internal
 new_stream_fit <- function(beta, beta_path, S = NULL, family = NULL,
                            method, call, hyperparams,
                            A_hat = NULL, B_hat = NULL,
-                           rss = NULL, n_obs = NULL) {
+                           rss = NULL, n_obs = NULL,
+                           pearson_ss = NULL) {
   structure(
     list(
       beta        = beta,
@@ -32,7 +50,8 @@ new_stream_fit <- function(beta, beta_path, S = NULL, family = NULL,
       A_hat       = A_hat,
       B_hat       = B_hat,
       rss         = rss,
-      n_obs       = n_obs
+      n_obs       = n_obs,
+      pearson_ss  = pearson_ss
     ),
     class = "stream_fit"
   )
@@ -108,7 +127,15 @@ vcov.stream_fit <- function(object, ...) {
       sigma2 <- object$rss / (object$n_obs - p)
       sigma2 * object$S
     },
-    `RLS-GLM` = object$S,
+    `RLS-GLM` = {
+      if (!is.null(object$family) && .needs_dispersion(object$family)) {
+        p <- length(object$beta)
+        phi_hat <- object$pearson_ss / (object$n_obs - p)
+        phi_hat * object$S
+      } else {
+        object$S
+      }
+    },
     iSGD = {
       if (is.null(object$A_hat) || is.null(object$B_hat))
         stop("vcov requires sandwich matrices; refit with compute_vcov = TRUE")
@@ -140,7 +167,10 @@ summary.stream_fit <- function(object, ...) {
 
   if (!is.null(V)) {
     se  <- sqrt(pmax(diag(V), 0))
-    if (object$method == "RLS") {
+    use_t <- object$method == "RLS" ||
+      (object$method == "RLS-GLM" && !is.null(object$family) &&
+       .needs_dispersion(object$family))
+    if (use_t) {
       stat <- beta / se
       df   <- n_obs - p
       pval <- 2 * stats::pt(-abs(stat), df = df)
@@ -210,7 +240,10 @@ confint.stream_fit <- function(object, parm, level = 0.95, ...) {
   n_obs <- object$n_obs
   if (is.null(n_obs)) n_obs <- nrow(object$beta_path)
 
-  if (object$method == "RLS") {
+  use_t <- object$method == "RLS" ||
+    (object$method == "RLS-GLM" && !is.null(object$family) &&
+     .needs_dispersion(object$family))
+  if (use_t) {
     q <- stats::qt((1 + level) / 2, df = n_obs - p)
   } else {
     q <- stats::qnorm((1 + level) / 2)
@@ -341,6 +374,13 @@ update.stream_fit <- function(object, x, y, ...) {
       object$beta <- out$beta
       object$S    <- out$S
       if (!is.null(object$n_obs)) object$n_obs <- object$n_obs + 1L
+      if (!is.null(object$pearson_ss)) {
+        eta_new <- pmin(pmax(as.numeric(crossprod(x, out$beta)),
+                             -hp$eta_clip), hp$eta_clip)
+        mu_new  <- object$family$linkinv(eta_new)
+        V_new   <- object$family$variance(mu_new)
+        object$pearson_ss <- object$pearson_ss + (y - mu_new)^2 / V_new
+      }
     },
     iSGD = {
       ## Step index must be computed BEFORE n_obs is incremented
