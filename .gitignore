@@ -1,0 +1,49 @@
+# R package build artifacts
+*.Rcheck/
+*.tar.gz
+*.zip
+
+# R session and history
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+
+# RStudio project files
+*.Rproj
+.Rproj.user/
+
+# roxygen2 / devtools cache
+/.rcache
+
+# knitr / rmarkdown
+*.knit.md
+*.utf8.md
+/doc/
+/Meta/
+
+# vignette build artifacts
+vignettes/*.html
+vignettes/*.pdf
+vignettes/*.R
+
+# pkgdown site
+docs/
+
+# Test outputs
+/tests/testthat/Rplots.pdf
+
+# Rplots output files
+Rplots*.pdf
+Rplots*.png
+
+# Compiled source files
+src/*.o
+src/*.so
+src/*.dll
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
