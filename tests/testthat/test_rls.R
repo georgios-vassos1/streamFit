@@ -50,7 +50,8 @@ test_that("rls_fit with lambda < 1 tracks a regime shift better than lambda = 1"
 test_that("rls_fit returns stream_fit with correct structure", {
   fit <- rls_fit(cbind(1, rnorm(50)), rnorm(50))
   expect_named(fit, c("beta", "beta_path", "S", "family", "method",
-                       "call", "hyperparams"))
+                       "call", "hyperparams", "A_hat", "B_hat",
+                       "rss", "n_obs"))
   expect_equal(nrow(fit$beta_path), 50)
   expect_equal(ncol(fit$beta_path), 2)
 })
