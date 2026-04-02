@@ -91,6 +91,9 @@ isgd_update <- function(x, y, beta, gamma, family) {
 #' @param family An R `family` object. Default [stats::gaussian()].
 #' @param gamma1 Positive scalar. Initial learning rate. Default `1`.
 #' @param alpha Decay exponent in `(0.5, 1]`. Default `0.7`.
+#' @param compute_vcov Logical. If `TRUE`, accumulate the sandwich covariance
+#'   matrices `A_hat` and `B_hat` needed for asymptotic inference (Toulis &
+#'   Airoldi, 2017). Adds `O(p^2)` cost per step. Default `TRUE`.
 #'
 #' @return A `stream_fit` object (without `S`, which iSGD does not maintain).
 #'
@@ -113,7 +116,8 @@ isgd_update <- function(x, y, beta, gamma, family) {
 #' }
 #'
 #' @export
-isgd_fit <- function(X, y, family = stats::gaussian(), gamma1 = 1.0, alpha = 0.7) {
+isgd_fit <- function(X, y, family = stats::gaussian(), gamma1 = 1.0, alpha = 0.7,
+                     compute_vcov = TRUE) {
   if (nrow(X) != length(y))
     stop("nrow(X) must equal length(y)")
   if (!is.numeric(gamma1) || length(gamma1) != 1 || gamma1 <= 0)
@@ -125,9 +129,49 @@ isgd_fit <- function(X, y, family = stats::gaussian(), gamma1 = 1.0, alpha = 0.7
   beta   <- numeric(p)
   gammas <- gamma1 * seq_len(n)^(-alpha)
   path   <- matrix(NA_real_, nrow = n, ncol = p)
+  if (compute_vcov) {
+    A_hat <- matrix(0.0, p, p)
+    B_hat <- matrix(0.0, p, p)
+  }
+  linkinv <- family$linkinv
+  mu.eta  <- family$mu.eta
+  variance <- family$variance
+  is_gaussian <- (family$family == "gaussian")
   for (i in seq_len(n)) {
-    beta      <- isgd_update(X[i, ], y[i], beta, gammas[i], family)
+    x_i     <- X[i, ]
+    eta_i   <- as.numeric(crossprod(x_i, beta))
+    mu_i    <- linkinv(eta_i)
+    if (compute_vcov) {
+      dmu_i   <- mu.eta(eta_i)
+      V_i     <- variance(mu_i)
+      w_i     <- dmu_i^2 / V_i
+      score_i <- (y[i] - mu_i) * dmu_i / V_i
+      xx_i    <- tcrossprod(x_i)
+      A_hat   <- A_hat + w_i * xx_i
+      B_hat   <- B_hat + score_i^2 * xx_i
+    }
+    ## Inline implicit SGD update (avoids recomputing eta/mu)
+    r_i <- gammas[i] * (y[i] - mu_i)
+    if (abs(r_i) >= .Machine$double.eps) {
+      norm_x2 <- as.numeric(crossprod(x_i))
+      if (is_gaussian) {
+        xi <- r_i / (1.0 + gammas[i] * norm_x2)
+      } else {
+        interval <- if (r_i > 0) c(0, r_i) else c(r_i, 0)
+        xi <- fast_uniroot(
+          f        = .implicit_fn,
+          interval = interval,
+          y = y[i], eta = eta_i, gamma = gammas[i],
+          norm_x2 = norm_x2, linkinv = linkinv
+        )
+      }
+      beta <- beta + xi * x_i
+    }
     path[i, ] <- beta
+  }
+  if (compute_vcov) {
+    A_hat <- A_hat / n
+    B_hat <- B_hat / n
   }
   new_stream_fit(
     beta        = beta,
@@ -136,6 +180,9 @@ isgd_fit <- function(X, y, family = stats::gaussian(), gamma1 = 1.0, alpha = 0.7
     family      = family,
     method      = "iSGD",
     call        = cl,
-    hyperparams = list(gamma1 = gamma1, alpha = alpha)
+    hyperparams = list(gamma1 = gamma1, alpha = alpha),
+    A_hat       = if (compute_vcov) A_hat else NULL,
+    B_hat       = if (compute_vcov) B_hat else NULL,
+    n_obs       = n
   )
 }
