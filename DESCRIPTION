@@ -1,0 +1,25 @@
+Package: streamFit
+Type: Package
+Title: Online Sequential Parameter Estimation for Streaming Data
+Version: 0.1.0
+Author: Georgios Vassos [aut, cre]
+Maintainer: Georgios Vassos <georgios.vassos@example.com>
+Description: Sequential online parameter estimation for generalised linear
+    models and linear models via two complementary algorithms: Recursive Least
+    Squares with Sherman-Morrison Fisher information updates (RLS-GLM,
+    O(p^2) per step) and Implicit Stochastic Gradient Descent (iSGD,
+    O(p) per step). Both algorithms support forgetting factors or adaptive
+    learning rate schedules for tracking time-varying parameters. Reduces to
+    standard weighted RLS for Gaussian responses. Compatible with any R
+    family object (binomial, poisson, gaussian, etc.). Designed for
+    extension to survival models, state-space models, and other streaming
+    estimation problems.
+License: MIT + file LICENSE
+Encoding: UTF-8
+URL: https://github.com/gvassos/streamFit
+BugReports: https://github.com/gvassos/streamFit/issues
+Imports:
+    stats
+Suggests:
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
