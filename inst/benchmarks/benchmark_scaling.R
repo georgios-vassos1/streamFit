@@ -152,8 +152,12 @@ yq   <- rbinom(N_Q, 1L, 1 / (1 + exp(-Xq %*% b0)))
 ## Shared hyperparameter: 1 / (w * p) where w ~ 0.25 (balanced binomial)
 hp_scale <- 4 / p_q
 
-## Cramér-Rao RMSE floor: sqrt(1 / (w * n/p)) for a balanced logistic model
-cr_floor <- sqrt(4 / (N_Q * 0.25))
+## Cramér-Rao RMSE floor: sqrt(1 / (n*w)) for a balanced logistic model.
+## Derivation: Fisher information per observation = w * E[x x'] ~ w * I_p
+## (for standardised features).  After n observations, F_n ~ n*w*I_p, so
+## each coordinate has variance >= 1/(n*w) and the average RMSE is
+## sqrt(mean_j Var(beta_j)) = sqrt(1/(n*w)).
+cr_floor <- sqrt(1 / (N_Q * 0.25))
 
 ## --- RLS-GLM quality path (calibrated S0 = hp_scale * I) -------------------
 br     <- numeric(p_q)
