@@ -1,3 +1,66 @@
+# streamFit 0.2.0 (development)
+
+## New modules
+
+* **`make_learner()`**: constructs `sl_learner` objects that wrap any
+  `fit` / `predict` / `update` triple behind the common Super Learner
+  interface.  The `update` slot is optional; learners without it are held
+  fixed during online ensemble weight updates.
+
+* **Batch Super Learner** (`super_learner_fit()`): cross-validated ensemble
+  with deviance-optimal convex weights.  S3 methods: `coef`, `predict`,
+  `print`.
+
+* **Online Super Learner** (`online_sl_fit()`, `update.online_sl()`):
+  initialises from a batch Super Learner then updates ensemble weights
+  one observation at a time via SGD on the deviance loss (Robbins–Monro
+  schedule `γ₁ t^{−δ}`).  Base learners are updated online when their
+  `update` function is provided.  S3 methods: `coef`, `predict`, `print`,
+  `update`.
+
+* **Online ATE / ATT estimator** (`online_ate_fit()`, `update.online_ate()`):
+  doubly-robust one-step AIPW estimator for the average treatment effect
+  (ATE) or average treatment effect on the treated (ATT).  Nuisance models
+  (`Q` and `g`) are fitted and updated online via the Online Super Learner.
+  Propensity scores are clamped to `(g_clamp, 1 − g_clamp)` to prevent
+  overflow in the clever covariate `H = A/g − (1−A)/(1−g)`.  Welford
+  running variance gives a streaming standard error.  S3 methods: `coef`,
+  `confint`, `print`, `update`.
+
+* **Online TMLE** (`online_tmle_fit()`, `update.online_tmle()`): targeted
+  maximum likelihood estimator that extends the one-step ATE / ATT estimator
+  with a one-dimensional targeting step, fluctuating `Q` along the submodel
+  `Q*(A,W) = linkinv(linkfun(Q(A,W)) + ε H(A,W))`.  Achieves second-order
+  bias reduction (`O_p(n⁻¹)` remainder) and asymptotic efficiency.  S3
+  methods: `coef`, `confint`, `print`, `update`.
+
+## Online TMLE — targeting details
+
+* **Iterative targeting** (`max_iter`, `tol`): the fluctuation step is
+  iterated until `|mean(H*(Y − Q*a))| < tol` or `max_iter` is reached.
+  `iter_converged` and `n_iter` fields on the returned object report
+  convergence status.  For Gaussian outcomes the score equation is satisfied
+  exactly in one pass (OLS normal equations); non-Gaussian families
+  (e.g. `binomial()`) require genuine iteration.
+
+* **Stage-specific clever covariate** (`sequential_init = FALSE`): under
+  CARA adaptive designs, observation `i` was collected under mechanism `G_i`
+  (the allocation rule after observing `1, …, i−1`).  Setting
+  `sequential_init = TRUE` replays batch observations sequentially so that
+  `g_c[i]` is predicted from the propensity model trained on observations
+  `1, …, i−1`, then updated.  The streaming phase already uses stage-specific
+  `G_i` via the predict-then-update protocol regardless of this flag.
+
+* **Martingale CLT variance** (`variance_type = "iid"` / `"martingale"`):
+  under a fixed treatment mechanism the default `"iid"` uses the
+  Bessel-corrected sample variance of TMLE EIF contributions.  Under
+  adaptive `G_t`, `"martingale"` uses the uncentered second moment
+  `V_t = (1/t) Σ [D*(P̂_i)(O_i)]²` (Chambaz & van der Laan 2011;
+  Chambaz, Zheng & van der Laan 2017).  The running sum `eif_sq_sum` is
+  always tracked and available on the object.
+
+---
+
 # streamFit 0.1.0
 
 * Initial release.
