@@ -4,7 +4,15 @@
 \alias{super_learner_fit}
 \title{Fit a Super Learner}
 \usage{
-super_learner_fit(X, y, family = stats::gaussian(), library, k = 5L)
+super_learner_fit(
+  X,
+  y,
+  family = stats::gaussian(),
+  library,
+  k = 5L,
+  cv_type = c("kfold", "sequential"),
+  n_min = NULL
+)
 }
 \arguments{
 \item{X}{Numeric matrix `n x p`. Design matrix.}
@@ -16,7 +24,16 @@ super_learner_fit(X, y, family = stats::gaussian(), library, k = 5L)
 \item{library}{A named list of `sl_learner` objects created with
 [make_learner()]. Must have at least one element.}
 
-\item{k}{Integer. Number of cross-validation folds. Default `5`.}
+\item{k}{Integer. Number of cross-validation folds (only used when
+`cv_type = "kfold"`). Default `5`.}
+
+\item{cv_type}{Character. Cross-validation strategy: `"kfold"` (default)
+or `"sequential"` (prequential).}
+
+\item{n_min}{Integer. Burn-in size for sequential CV: the number of
+observations used to initialise the base learners before the first
+prequential prediction is recorded.  Defaults to
+`max(2 * ncol(X), 20L)`. Ignored when `cv_type = "kfold"`.}
 }
 \value{
 An object of class `super_learner_fit` with elements:
@@ -27,22 +44,47 @@ An object of class `super_learner_fit` with elements:
     \item{`family`}{The family object.}
     \item{`cv_risk`}{Named numeric vector of per-learner cross-validated
       deviance.}
-    \item{`k`}{Number of CV folds used.}
+    \item{`sl_cv_risk`}{Scalar. Cross-validated deviance of the ensemble
+      itself (i.e. the deviance of `Z \%*\% weights` against `y`). By
+      construction this is \eqn{\leq} `min(cv_risk)` (oracle inequality).}
+    \item{`Z`}{Numeric matrix `n x L` of out-of-sample predictions from
+      each base learner (response scale). Rows `1:n_min` are `NA` under
+      sequential CV.}
+    \item{`cv_type`}{Character. The CV strategy used (`"kfold"` or
+      `"sequential"`).}
+    \item{`k`}{Number of CV folds (k-fold only; `NA` otherwise).}
+    \item{`n_min`}{Burn-in size (sequential only; `NA` otherwise).}
     \item{`n_obs`}{Number of observations.}
     \item{`call`}{The matched call.}
   }
 }
 \description{
-Combines a library of base learners via k-fold cross-validation. Each base
-learner produces out-of-fold predictions; a meta-learner then finds the
-optimal convex combination of those predictions by minimising the in-sample
-deviance. All base learners are finally refitted on the full data.
+Combines a library of base learners via cross-validation. Two CV strategies
+are available:
 }
 \details{
+* **`"kfold"`** (default) — standard K-fold CV. Observations are randomly
+  partitioned into `k` folds; each fold is held out in turn for prediction.
+  Assumes i.i.d. observations.
+
+* **`"sequential"`** — prequential (one-step-ahead) CV for dependent or
+  streaming data. At each time \eqn{t > n_{\min}}, the base learners are
+  trained on observations \eqn{1,\ldots,t-1} and their predictions at
+  \eqn{t} are recorded before \eqn{y_t} is revealed.  This respects the
+  temporal ordering of the data and is valid under weak mixing conditions
+  without assuming i.i.d. errors (Chambaz & van der Laan, 2014).
+
+After CV, all base learners are refitted on the full data and the
+meta-learner finds the optimal convex combination of their predictions by
+minimising the total deviance over the CV predictions.
+
 Each learner in `library` must be created with [make_learner()]:
 * `fit(X, y, family, ...)` — trains the model and returns a fitted object.
 * `predict(model, newdata, ...)` — returns a numeric vector of
   **response-scale** predictions.
+* `update(model, x, y, family, ...)` (optional) — ingests one observation
+  and returns an updated model. Required for O(n) sequential CV; without it
+  the learner is re-fitted from scratch at every step (O(n^2)).
 }
 \examples{
 \donttest{
@@ -52,10 +94,11 @@ X     <- cbind(1, matrix(rnorm(n * (p - 1)), n, p - 1))
 beta0 <- c(-0.5, 1, -1, 0.5)
 y     <- rbinom(n, 1, 1 / (1 + exp(-X \%*\% beta0)))
 
-library <- list(
+lib <- list(
   rls_glm = make_learner(
     fit     = function(X, y, family, ...) rls_glm_fit(X, y, family = family),
-    predict = function(model, newdata, ...) predict(model, newdata)
+    predict = function(model, newdata, ...) predict(model, newdata),
+    update  = function(model, x, y, family, ...) update(model, x = x, y = y)
   ),
   isgd = make_learner(
     fit     = function(X, y, family, ...) isgd_fit(X, y, family = family),
@@ -63,11 +106,22 @@ library <- list(
   )
 )
 
-sl <- super_learner_fit(X, y, family = binomial(), library = library, k = 5)
-print(sl)
+## Standard k-fold
+sl_kf <- super_learner_fit(X, y, family = binomial(), library = lib, k = 5)
+print(sl_kf)
+
+## Prequential CV (respects temporal ordering)
+sl_sq <- super_learner_fit(X, y, family = binomial(), library = lib,
+                            cv_type = "sequential", n_min = 50L)
+print(sl_sq)
 }
 
 }
+\references{
+Chambaz, A. & van der Laan, M. J. (2014). Targeting the optimal design in
+randomized trials with binary outcomes and no covariate. *Int. J. Biostat.*,
+10(1), 97–131. (Sequential CV framework.)
+}
 \seealso{
-[make_learner()], [predict.super_learner_fit()]
+[make_learner()], [predict.super_learner_fit()], [online_sl_fit()]
 }

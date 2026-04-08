@@ -4,7 +4,7 @@
 \alias{make_learner}
 \title{Construct a learner specification}
 \usage{
-make_learner(fit, predict, name = NULL)
+make_learner(fit, predict, update = NULL, name = NULL)
 }
 \arguments{
 \item{fit}{A function with signature `function(X, y, family, ...)` that
@@ -13,26 +13,35 @@ returns a fitted model object.}
 \item{predict}{A function with signature `function(model, newdata, ...)` that
 returns a numeric vector of **response-scale** predictions.}
 
+\item{update}{Optional function with signature
+`function(model, x, y, family, ...)` that ingests a single new observation
+and returns an updated model. Used by [online_sl_fit()] to keep base
+learners current as new data arrives. If `NULL` (default), the base
+learner is held fixed during online weight updates.}
+
 \item{name}{Optional character string used as a label. If `NULL`, the
 learner is labelled by its position in the library.}
 }
 \value{
 A list of class `sl_learner` with elements `fit`, `predict`,
-  and `name`.
+  `update`, and `name`.
 }
 \description{
-Creates a learner object for use in [super_learner_fit()]. A learner wraps
-a `fit` function and a `predict` function behind a common interface.
+Creates a learner object for use in [super_learner_fit()] and
+[online_sl_fit()]. A learner wraps a `fit` function, a `predict` function,
+and an optional `update` function behind a common interface.
 }
 \examples{
 \donttest{
+## Learner with online update support via stream_fit
 lrn <- make_learner(
   fit     = function(X, y, family, ...) rls_glm_fit(X, y, family = family),
-  predict = function(model, newdata, ...) predict(model, newdata)
+  predict = function(model, newdata, ...) predict(model, newdata),
+  update  = function(model, x, y, family, ...) update(model, x = x, y = y)
 )
 }
 
 }
 \seealso{
-[super_learner_fit()]
+[super_learner_fit()], [online_sl_fit()]
 }
