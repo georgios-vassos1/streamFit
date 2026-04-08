@@ -1,6 +1,6 @@
 ## Tests for online_tmle_fit() and update.online_tmle()
 ##
-## Reference implementations consulted:
+## Reference implementations consulted (Items 1–7 / original tests):
 ##   - tlverse/tmle3, tests/testthat/test-ATE.R,
 ##     https://github.com/tlverse/tmle3/blob/master/tests/testthat/test-ATE.R
 ##     Strategy: ATE psi and SE match the classic `tmle` package within 1/sqrt(n).
@@ -30,6 +30,23 @@
 ##     Strategy: exact numerical agreement between package output and a hand-coded
 ##     Neyman-orthogonal score (our oracle in Test 2).
 ##
+## Reference implementations consulted (Items 8–11 / stage-specific g and martingale CLT):
+##   - achambaz/tsml.cara.rct,
+##     https://github.com/achambaz/tsml.cara.rct
+##     Reference CARA TMLE package: simulates adaptive RCTs where G_t changes at
+##     each stage. No unit test suite; the package itself is the authoritative
+##     CARA implementation. Test 8 mirrors its adaptive-design simulation.
+##   - Chambaz & van der Laan (2011), Int. J. Biostatistics 7(1),
+##     DOI: 10.2202/1557-4679.1247 (Theoretical) and 10.2202/1557-4679.1310 (Simulation)
+##     Key result: TMLE is consistent and asymptotically Gaussian under CARA when H_i
+##     uses the stage-i mechanism G_i. Section 4 simulation verifies convergence to
+##     ATE = 1 — our oracle for Tests 3 and 8.
+##   - Chambaz, Zheng & van der Laan (2017), Ann. Statist. 45(6): 2537–2564,
+##     DOI: 10.1214/16-AOS1534
+##     Martingale CLT for sequential TMLE; asymptotic variance V_t = (1/t) sum D*(P_hat_i)^2.
+##     No active test suite (theoretical paper). Tests 9–10 verify the formula oracle.
+##     Gap: no R package implements the martingale variance; Test 10 fills this gap.
+##
 ## Step 2 — Classification of reference tests:
 ##
 ##   | Test from references                           | Class                | Keep |
@@ -44,6 +61,11 @@
 ##   | TMLE var > IC var under positivity violation   | Empirical            | Yes  |
 ##   | ltmle relative score < 0.001 (commented out)  | Edge case            | Yes  |
 ##   | tmle3 convergence: |ED| <= SE/log(n)           | Oracle               | Yes  |
+##   | sequential g differs from pooled (CARA DGP)   | Empirical            | Yes  |
+##   | eif_sq_sum = sum(EIF^2) batch oracle           | Oracle / exactness   | Yes  |
+##   | SE_martingale uses uncentered 2nd moment       | Oracle               | Yes  |
+##   | eif_sq_sum updates correctly in streaming      | Oracle / exactness   | Yes  |
+##   | martingale SE ≈ i.i.d. SE for large n          | Asymptotic identity  | No   |
 ##
 ## Properties tested (with reference):
 ##   1. Batch score equation satisfied exactly for Gaussian outcome.
@@ -62,15 +84,29 @@
 ##   7. max_iter=1 cannot converge to tight tol for logistic; iter_converged
 ##      reflects true score-equation status, not a hardcoded flag.
 ##      [cran/tmle ATT converged flag; ltmle commented-out FixScoreEquation test]
+##   8. sequential_init=TRUE produces different EIF (and psi) from pooled g
+##      under a two-phase CARA DGP (mechanism shift at obs 201).
+##      [achambaz/tsml.cara.rct adaptive simulation; Chambaz & van der Laan 2011 §4]
+##   9. eif_sq_sum = sum(EIF_i^2) in the batch phase to 1e-8.
+##      [Chambaz, Zheng & van der Laan 2017 — V_t = (1/t) sum D*(P_hat_i)^2]
+##  10. SE_martingale = sqrt(eif_sq_sum)/n; strictly greater than SE_iid
+##      because eif_sq_sum/n^2 = eif_var/n + psi^2/n > eif_var/n for psi != 0.
+##      [Chambaz, Zheng & van der Laan 2017 — no active test in reference packages]
+##  11. eif_sq_sum is correctly incremented in update.online_tmle:
+##      new_eif_sq_sum = old_eif_sq_sum + eif_stream^2 to machine precision.
+##      [Chambaz, Zheng & van der Laan 2017 — online accumulation of V_t]
 ##
 ## Step 5 audit:
 ##   1. Optimiser / gradient direction: Test 1 (Gaussian score) and Test 6
 ##      (logistic score) both fail if eps_k is added with wrong sign or if
 ##      the iterative offset doesn't update from Q to Q*_k correctly.
+##      Test 8 fails if the sequential g replay processes obs in wrong order.
 ##   2. Prediction function: Test 2 recomputes predictions from the stored
 ##      Q_sl / g_sl — wrong ensemble weights → manual EIF ≠ package psi.
+##      Test 9 and Test 11 also verify the EIF computation chain.
 ##   3. Edge case: ## TODO: add propensity clamping test (near-deterministic g)
 ##      analogous to test_online_ate.R Test 5.
+##      ## TODO: add sequential_init=TRUE with very small n (n near k_burn).
 ##   4. Family / link function: Test 1 exercises Gaussian (identity link);
 ##      Tests 6 and 7 exercise binomial (logit link) including qlogis offset
 ##      and expit Q* at each iteration.
@@ -365,4 +401,190 @@ test_that("iter_converged=FALSE at unachievable tol; targeting reduces score vs 
   score_before <- abs(mean(H * (Y - Qa)))   # eps=0, no targeting
   score_after  <- abs(mean(H * (Y - fam$linkinv(fam$linkfun(Qa) + tmle$epsilon * H))))
   expect_lt(score_after, score_before)
+})
+
+
+## ---- 8. Stage-specific g gives different EIF than pooled g (Item 2) --------
+## DGP: CARA-like two-phase mechanism.  First 200 obs: A ~ Bern(plogis(0.2*W2));
+## next 200 obs: A ~ Bern(plogis(1.5*W2)).  Both phases share the same Q DGP.
+## Under sequential_init=TRUE the propensity score used for H_i is the model
+## trained on obs 1..(i-1), capturing the phase-shift.  Under sequential_init=FALSE
+## a pooled G fitted on all 400 obs is used, smearing both phases together.
+## The two strategies give different weighted H_i values → different psi.
+##
+## References: achambaz/tsml.cara.rct (stage-specific allocation design);
+##             Chambaz & van der Laan (2011) §4 simulation validates CARA TMLE.
+##
+## Would fail if: sequential_init=TRUE internally falls back to the pooled g_sl
+## (e.g., the sequential replay loop is short-circuited), making both estimates
+## numerically equal even under a two-phase DGP.
+
+test_that("sequential_init uses stage-specific g, giving different EIF from pooled g", {
+  set.seed(101L)
+  n  <- 400L
+  W  <- cbind(1, rnorm(n))
+
+  ## Two-phase mechanism: different confounding strength in each half.
+  g_true <- c(plogis(0.2 * W[seq_len(200L),    2L]),
+              plogis(1.5 * W[seq_len(200L) + 200L, 2L]))
+  A <- rbinom(n, 1L, g_true)
+  Y <- 1.0 * A + 0.8 * W[, 2L] + rnorm(n, sd = 0.5)
+
+  lib <- make_lib_rls()
+
+  set.seed(101L)
+  tmle_pool <- online_tmle_fit(W, A, Y,
+                               Q_library      = lib,
+                               g_library      = lib,
+                               sequential_init = FALSE)
+
+  set.seed(101L)
+  tmle_seq  <- online_tmle_fit(W, A, Y,
+                               Q_library      = lib,
+                               g_library      = lib,
+                               sequential_init = TRUE)
+
+  ## Stage-specific H_i values differ from pooled H_i under a two-phase DGP,
+  ## so the EIF means — and therefore psi — must differ.
+  expect_false(isTRUE(all.equal(coef(tmle_pool), coef(tmle_seq), tolerance = 1e-4)))
+})
+
+
+## ---- 9. eif_sq_sum = sum(EIF_i^2) batch oracle (Item 3) --------------------
+## Verify that the running sum of squared TMLE EIF contributions stored in
+## eif_sq_sum equals sum(eif_i^2) recomputed from the stored nuisance models.
+## This is the sample estimator of V_t in Chambaz, Zheng & van der Laan (2017):
+##   V_t = (1/t) sum_{i=1}^{t} [D*(P_hat_i)(O_i)]^2
+##
+## For the batch phase: eif_i = H_i*(Y_i - Q*a_i) + Q1*_i - Q0*_i (un-centered)
+## is computed from the pooled nuisance models (sequential_init=FALSE here).
+## The oracle recomputes the same vector using the batch link-function identity
+##   Q*a = linkinv( linkfun(Q) + eps * H )
+## and verifies sum(eif^2) matches eif_sq_sum to 1e-8.
+##
+## Would fail if: eif_sq_sum is initialised from eif_M2 (the Welford centered
+## sum-of-squares) instead of sum(psi_i^2), making it smaller by n*psi^2.
+
+test_that("eif_sq_sum equals sum of squared EIF contributions in batch to 1e-8", {
+  set.seed(88L)
+  n <- 300L
+  W <- cbind(1, matrix(rnorm(n * 2L), n, 2L))
+  A <- rbinom(n, 1L, plogis(0.4 * W[, 2L]))
+  Y <- 1.0 * A + 0.5 * W[, 2L] + rnorm(n, sd = 0.5)
+
+  lib  <- make_lib_rls()
+  tmle <- online_tmle_fit(W, A, Y, Q_library = lib, g_library = lib)
+
+  ## Re-derive EIF manually from stored nuisance (same oracle as Test 2).
+  eps <- tmle$epsilon
+  fam <- tmle$family
+  Q1  <- predict(tmle$Q_sl, cbind(1, W))
+  Q0  <- predict(tmle$Q_sl, cbind(0, W))
+  Qa  <- predict(tmle$Q_sl, cbind(A, W))
+  g_c <- pmin(pmax(predict(tmle$g_sl, W), tmle$g_clamp), 1 - tmle$g_clamp)
+
+  H      <- A / g_c - (1 - A) / (1 - g_c)
+  H1     <-  1 / g_c
+  H0     <- -1 / (1 - g_c)
+  Qa_str <- fam$linkinv(fam$linkfun(Qa) + eps * H)
+  Q1_str <- fam$linkinv(fam$linkfun(Q1) + eps * H1)
+  Q0_str <- fam$linkinv(fam$linkfun(Q0) + eps * H0)
+  eif    <- H * (Y - Qa_str) + Q1_str - Q0_str
+
+  expect_equal(tmle$eif_sq_sum, sum(eif^2), tolerance = 1e-8)
+})
+
+
+## ---- 10. Martingale SE uses uncentered 2nd moment; > i.i.d. SE for psi ≠ 0
+## Formula: SE_martingale = sqrt(eif_sq_sum) / n_obs.
+## Since eif_sq_sum = eif_M2 + n*psi^2 = (n-1)*eif_var + n*psi^2:
+##   SE_martingale^2 = (eif_var*(n-1)/n + psi^2) / n
+##   SE_iid^2        = eif_var / n
+## For any non-zero psi (which is always true for ATE ≠ 0):
+##   SE_martingale > SE_iid.
+##
+## References: Chambaz, Zheng & van der Laan (2017) V_t formula (no active test).
+##
+## Would fail if: variance_type="martingale" secretly uses eif_var (the i.i.d.
+## formula), making the two SEs identical and the expect_gt assertion false.
+
+test_that("SE_martingale = sqrt(eif_sq_sum)/n and exceeds SE_iid for non-zero ATE", {
+  set.seed(55L)
+  n <- 400L
+  W <- cbind(1, matrix(rnorm(n * 2L), n, 2L))
+  A <- rbinom(n, 1L, plogis(0.4 * W[, 2L]))
+  Y <- 1.0 * A + 0.5 * W[, 2L] + rnorm(n, sd = 0.5)
+
+  lib      <- make_lib_rls()
+  tmle_iid <- online_tmle_fit(W, A, Y, Q_library = lib, g_library = lib,
+                              variance_type = "iid")
+  tmle_mrt <- online_tmle_fit(W, A, Y, Q_library = lib, g_library = lib,
+                              variance_type = "martingale")
+
+  ## Both objects have the same nuisance models and eif_sq_sum (same DGP + seed).
+  se_mart_direct <- sqrt(tmle_mrt$eif_sq_sum) / tmle_mrt$n_obs
+  se_iid_direct  <- sqrt(tmle_iid$eif_var / tmle_iid$n_obs)
+
+  ## SE from confint() must match the direct formula.
+  ci_mart <- confint(tmle_mrt)
+  se_from_confint <- (ci_mart[1L, 2L] - ci_mart[1L, 1L]) / (2 * qnorm(0.975))
+  expect_equal(se_from_confint, se_mart_direct, tolerance = 1e-10)
+
+  ## Martingale SE > i.i.d. SE when psi ≠ 0 (ATE ≈ 1 in this DGP).
+  expect_gt(se_mart_direct, se_iid_direct)
+})
+
+
+## ---- 11. eif_sq_sum is correctly incremented during streaming (Item 3) ------
+## After one streaming update with new observation (w_new, a_new, y_new), the
+## new eif_sq_sum must equal old eif_sq_sum + eif_stream^2, where eif_stream
+## is computed from the PRE-update nuisance models (predict-then-update).
+##
+## Oracle: replicate the streaming EIF formula inline using the pre-update Q_sl,
+## g_sl, and epsilon stored in the object before the update.
+##
+## References: Chambaz, Zheng & van der Laan (2017) — online accumulation of V_t.
+##
+## Would fail if: the line `object$eif_sq_sum <- object$eif_sq_sum + eif^2` is
+## absent from update.online_tmle(), causing eif_sq_sum to stay constant while
+## the Welford mean and variance continue to evolve.
+
+test_that("eif_sq_sum is incremented by eif_stream^2 after one streaming update", {
+  set.seed(200L)
+  n <- 200L
+  W <- cbind(1, rnorm(n))
+  A <- rbinom(n, 1L, plogis(0.3 * W[, 2L]))
+  Y <- 1.0 * A + 0.5 * W[, 2L] + rnorm(n, sd = 0.5)
+
+  lib  <- make_lib_rls()
+  tmle <- online_tmle_fit(W, A, Y, Q_library = lib, g_library = lib)
+
+  ## Fixed new observation — values chosen to give a non-trivial EIF.
+  w_new <- c(1, 0.7); a_new <- 1L; y_new <- 1.8
+
+  ## Replicate the streaming EIF computation using pre-update nuisance.
+  ## (Mirrors the logic in update.online_tmle; no internal-function dependency.)
+  eps   <- tmle$epsilon
+  fam   <- tmle$family
+  mA    <- tmle$sum_A / tmle$n_obs       # mean_A before update
+
+  Q1_s  <- predict(tmle$Q_sl, matrix(c(1, w_new),     nrow = 1L))
+  Q0_s  <- predict(tmle$Q_sl, matrix(c(0, w_new),     nrow = 1L))
+  Qa_s  <- predict(tmle$Q_sl, matrix(c(a_new, w_new), nrow = 1L))
+  g_s   <- pmin(pmax(predict(tmle$g_sl, matrix(w_new, nrow = 1L)),
+                     tmle$g_clamp), 1 - tmle$g_clamp)
+
+  H_s   <- a_new / g_s - (1 - a_new) / (1 - g_s)   # ATE clever covariate
+  H1_s  <-  1 / g_s
+  H0_s  <- -1 / (1 - g_s)
+
+  Qa_str <- fam$linkinv(fam$linkfun(Qa_s) + eps * H_s)
+  Q1_str <- fam$linkinv(fam$linkfun(Q1_s) + eps * H1_s)
+  Q0_str <- fam$linkinv(fam$linkfun(Q0_s) + eps * H0_s)
+  eif_s  <- H_s * (y_new - Qa_str) + Q1_str - Q0_str
+
+  sq_before <- tmle$eif_sq_sum
+  tmle_upd  <- update(tmle, w = w_new, a = a_new, y = y_new)
+
+  expect_equal(tmle_upd$eif_sq_sum, sq_before + eif_s^2, tolerance = 1e-10)
 })

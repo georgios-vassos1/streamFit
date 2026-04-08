@@ -84,11 +84,24 @@
 
 ## Compute the standard error from an online_tmle object.
 ##
+## Two variance estimators are supported via \code{object$variance_type}:
+##   "iid"        (default) -- sample variance of TMLE EIF contributions,
+##                valid under i.i.d. / fixed G.
+##   "martingale" -- uncentered second moment V = (1/n) sum D*(P_hat_i)^2,
+##                consistent under the Rebolledo / Lyapunov martingale CLT
+##                for adaptive designs (Chambaz & van der Laan 2011;
+##                Chambaz, Zheng & van der Laan 2017).
+##
 ## @param object An \code{online_tmle} object.
 ## @return       Scalar standard error.
 ## @keywords     internal
 .tmle_se <- function(object) {
-  se <- sqrt(object$eif_var / object$n_obs)
+  se <- if (identical(object$variance_type, "martingale")) {
+    ## Uncentered: SE = sqrt( (1/n) sum D*_i^2 / n ) = sqrt(eif_sq_sum) / n
+    sqrt(object$eif_sq_sum) / object$n_obs
+  } else {
+    sqrt(object$eif_var / object$n_obs)
+  }
   if (object$target == "ATT") se <- se / (object$sum_A / object$n_obs)
   se
 }
@@ -142,11 +155,27 @@
 #'   updates.  Default `1`.
 #' @param delta          Robbins-Monro decay exponent in \eqn{(0.5, 1]}.
 #'   Default `0.6`.
-#' @param max_iter       Maximum number of targeting iterations.  Each
+#' @param max_iter        Maximum number of targeting iterations.  Each
 #'   iteration refits \eqn{\varepsilon} on the current \eqn{Q^*} and updates
 #'   \eqn{Q^*}.  Default `10`.
-#' @param tol            Convergence threshold for the score equation
+#' @param tol             Convergence threshold for the score equation
 #'   \eqn{|\bar H(Y - Q^*_a)| < \texttt{tol}}.  Default `1e-6`.
+#' @param sequential_init Logical.  If `TRUE`, replay batch observations
+#'   sequentially to obtain stage-specific propensity scores \eqn{G_i} for
+#'   each batch observation \eqn{i}.  Required for valid inference under CARA
+#'   adaptive designs where the treatment mechanism changes between stages.
+#'   Briefly: `g_c[i]` is predicted from the propensity model trained on
+#'   observations \eqn{1, \ldots, i-1}, then that model is updated with
+#'   observation \eqn{i}.  Default `FALSE` (pooled \eqn{G} valid for
+#'   i.i.d. designs).
+#' @param variance_type   `"iid"` (default) or `"martingale"`.  Selects the
+#'   standard-error formula used by [print.online_tmle()] and
+#'   [confint.online_tmle()].  `"iid"` uses the sample variance of TMLE EIF
+#'   contributions \eqn{\widehat{\mathrm{Var}}(D^*)/n}, valid under fixed
+#'   \eqn{G}.  `"martingale"` uses the uncentered second moment
+#'   \eqn{\hat V_n / n} where \eqn{\hat V_n = n^{-1}\sum_i [D^*(\hat P_i)(O_i)]^2},
+#'   consistent under the Rebolledo / Lyapunov martingale CLT for adaptive
+#'   designs (Chambaz & van der Laan 2011; Chambaz, Zheng & van der Laan 2017).
 #'
 #' @return An object of class `online_tmle` with elements:
 #'   \describe{
@@ -166,6 +195,11 @@
 #'     \item{`eif_var`}{Running sample variance of TMLE EIF contributions.}
 #'     \item{`eif_M2`}{Welford M2 accumulator.}
 #'     \item{`sum_A`}{Running \eqn{\sum A_i} (used for ATT normalisation).}
+#'     \item{`sequential_init`}{Logical: was stage-specific \eqn{G_i} used in
+#'       the batch phase?}
+#'     \item{`variance_type`}{`"iid"` or `"martingale"`.}
+#'     \item{`eif_sq_sum`}{Running sum \eqn{\sum_i [D^*(\hat P_i)(O_i)]^2} of
+#'       squared TMLE EIF contributions, used for the martingale variance.}
 #'     \item{`n_batch`}{Number of batch observations.}
 #'     \item{`n_obs`}{Total observations (batch + stream).}
 #'     \item{`call`}{Matched call.}
@@ -205,16 +239,19 @@
 #' @export
 online_tmle_fit <- function(W, A, Y,
                             Q_library, g_library,
-                            outcome_family = stats::gaussian(),
-                            target   = c("ATE", "ATT"),
-                            k        = 5L,
-                            g_clamp  = 0.01,
-                            gamma1   = 1.0,
-                            delta    = 0.6,
-                            max_iter = 10L,
-                            tol      = 1e-6) {
-  cl     <- match.call()
-  target <- match.arg(target)
+                            outcome_family  = stats::gaussian(),
+                            target          = c("ATE", "ATT"),
+                            k               = 5L,
+                            g_clamp         = 0.01,
+                            gamma1          = 1.0,
+                            delta           = 0.6,
+                            max_iter        = 10L,
+                            tol             = 1e-6,
+                            sequential_init = FALSE,
+                            variance_type   = c("iid", "martingale")) {
+  cl            <- match.call()
+  target        <- match.arg(target)
+  variance_type <- match.arg(variance_type)
 
   ## --- Input validation (mirrors online_ate_fit) ----------------------------
   if (!is.matrix(W))
@@ -252,10 +289,48 @@ online_tmle_fit <- function(W, A, Y,
   W0 <- cbind(0, W)   # A = 0 counterfactual features
   WA <- cbind(A, W)   # observed treatment features
 
-  Q1  <- predict(Q_sl, W1)
-  Q0  <- predict(Q_sl, W0)
-  Qa  <- predict(Q_sl, WA)
-  g_c <- .g_clamp(predict(g_sl, W), g_clamp)
+  Q1 <- predict(Q_sl, W1)
+  Q0 <- predict(Q_sl, W0)
+  Qa <- predict(Q_sl, WA)
+
+  ## --- Batch propensity: pooled (i.i.d.) or stage-specific (CARA) ----------
+  ##
+  ## Under i.i.d. sampling (sequential_init = FALSE) a single pooled g fitted
+  ## on all batch data is asymptotically correct.
+  ##
+  ## Under CARA adaptive designs observation i was collected under mechanism
+  ## G_i (the allocation rule after seeing obs 1..(i-1)).  Using the pooled
+  ## G̃ introduces non-negligible bias in the EIF score equation.  When
+  ## sequential_init = TRUE we replay the batch sequentially: g_c[i] is
+  ## predicted from the propensity model trained on obs 1..(i-1), then updated
+  ## with obs i.  A burn-in of k_burn observations bootstraps the learner
+  ## before the sequential replay begins.
+  ##
+  ## References: Chambaz & van der Laan (2011), Int. J. Biostatistics 7(1);
+  ##             achambaz/tsml.cara.rct (github.com/achambaz/tsml.cara.rct).
+  if (sequential_init) {
+    k_burn   <- min(max(2L * k, 2L * ncol(W), 10L), n - 1L)
+    k_burn_k <- min(2L, k_burn %/% 2L)   # ≤ 2-fold CV for burn-in
+
+    g_replay <- online_sl_fit(
+      W[seq_len(k_burn), , drop = FALSE],
+      A[seq_len(k_burn)],
+      family  = stats::binomial(),
+      library = g_library,
+      k       = k_burn_k,
+      gamma1  = gamma1,
+      delta   = delta
+    )
+    g_c <- numeric(n)
+    for (i in seq_len(n)) {
+      g_c[i]   <- .g_clamp(
+        predict(g_replay, matrix(W[i, ], nrow = 1L)), g_clamp
+      )
+      g_replay <- update(g_replay, x = W[i, ], y = A[i])
+    }
+  } else {
+    g_c <- .g_clamp(predict(g_sl, W), g_clamp)
+  }
 
   ## --- Iterative targeting: fluctuate Q along 1-D submodel until EIF ≈ 0 ---
   ##
@@ -312,10 +387,13 @@ online_tmle_fit <- function(W, A, Y,
   }
 
   ## --- Initialise Welford accumulators from batch TMLE EIF ------------------
-  eif_mean <- mean(eif_vec)
-  eif_M2   <- sum((eif_vec - eif_mean)^2)   # (n-1) * sample_var
-  eif_var  <- if (n > 1L) eif_M2 / (n - 1L) else 0
-  sum_A    <- sum(A)
+  eif_mean   <- mean(eif_vec)
+  eif_M2     <- sum((eif_vec - eif_mean)^2)   # (n-1) * sample_var
+  eif_var    <- if (n > 1L) eif_M2 / (n - 1L) else 0
+  ## Running sum of squares for martingale CLT variance
+  ## V_n = (1/n) sum D*(P_hat_i)^2  (Chambaz & van der Laan 2011, Eq. 3)
+  eif_sq_sum <- sum(eif_vec^2)
+  sum_A      <- sum(A)
 
   ## --- Point estimate -------------------------------------------------------
   psi <- if (target == "ATE") {
@@ -326,23 +404,26 @@ online_tmle_fit <- function(W, A, Y,
 
   structure(
     list(
-      Q_sl           = Q_sl,
-      g_sl           = g_sl,
-      epsilon_fit    = epsilon_fit,
-      epsilon        = epsilon,
-      n_iter         = n_iter,
-      iter_converged = iter_converged,
-      target         = target,
-      family         = outcome_family,
-      g_clamp        = g_clamp,
-      psi            = psi,
-      eif_mean       = eif_mean,
-      eif_var        = eif_var,
-      eif_M2         = eif_M2,
-      sum_A          = sum_A,
-      n_batch        = n,
-      n_obs          = n,
-      call           = cl
+      Q_sl            = Q_sl,
+      g_sl            = g_sl,
+      epsilon_fit     = epsilon_fit,
+      epsilon         = epsilon,
+      n_iter          = n_iter,
+      iter_converged  = iter_converged,
+      target          = target,
+      family          = outcome_family,
+      g_clamp         = g_clamp,
+      psi             = psi,
+      eif_mean        = eif_mean,
+      eif_var         = eif_var,
+      eif_M2          = eif_M2,
+      eif_sq_sum      = eif_sq_sum,
+      sequential_init = sequential_init,
+      variance_type   = variance_type,
+      sum_A           = sum_A,
+      n_batch         = n,
+      n_obs           = n,
+      call            = cl
     ),
     class = "online_tmle"
   )
@@ -419,13 +500,15 @@ update.online_tmle <- function(object, w, a, y, ...) {
     .att_eif(Q1_star, Q0_star, Qa_star, g_c, a, y)
   }
 
-  ## --- Welford running update -----------------------------------------------
-  n_new           <- object$n_obs + 1L
-  delta_eif       <- eif - object$eif_mean
-  object$eif_mean <- object$eif_mean + delta_eif / n_new
-  delta2_eif      <- eif - object$eif_mean
-  object$eif_M2   <- object$eif_M2 + delta_eif * delta2_eif
-  object$eif_var  <- if (n_new > 1L) object$eif_M2 / (n_new - 1L) else 0
+  ## --- Welford running update (i.i.d. variance) and martingale sq-sum ------
+  n_new              <- object$n_obs + 1L
+  delta_eif          <- eif - object$eif_mean
+  object$eif_mean    <- object$eif_mean + delta_eif / n_new
+  delta2_eif         <- eif - object$eif_mean
+  object$eif_M2      <- object$eif_M2 + delta_eif * delta2_eif
+  object$eif_var     <- if (n_new > 1L) object$eif_M2 / (n_new - 1L) else 0
+  ## Accumulate sum of squares for martingale CLT variance (always tracked).
+  object$eif_sq_sum  <- object$eif_sq_sum + eif^2
 
   ## --- Update epsilon model, then epsilon -----------------------------------
   object$epsilon_fit <- update(object$epsilon_fit,
@@ -472,6 +555,8 @@ print.online_tmle <- function(x, digits = 4L, ...) {
   cat("Observations:", x$n_obs,
       sprintf("(%d batch + %d stream)\n",
               x$n_batch, x$n_obs - x$n_batch))
+  if (!identical(x$variance_type, "iid"))
+    cat(sprintf("Variance    : %s CLT\n", x$variance_type))
   cat(sprintf("epsilon     : %.*f  (%d iter%s)\n",
               digits, x$epsilon, x$n_iter,
               if (isTRUE(x$iter_converged)) "" else ", not converged"))
