@@ -142,14 +142,22 @@
 #'   updates.  Default `1`.
 #' @param delta          Robbins-Monro decay exponent in \eqn{(0.5, 1]}.
 #'   Default `0.6`.
+#' @param max_iter       Maximum number of targeting iterations.  Each
+#'   iteration refits \eqn{\varepsilon} on the current \eqn{Q^*} and updates
+#'   \eqn{Q^*}.  Default `10`.
+#' @param tol            Convergence threshold for the score equation
+#'   \eqn{|\bar H(Y - Q^*_a)| < \texttt{tol}}.  Default `1e-6`.
 #'
 #' @return An object of class `online_tmle` with elements:
 #'   \describe{
 #'     \item{`Q_sl`}{`online_sl` for \eqn{E[Y|A,W]}; features = cbind(A, W).}
 #'     \item{`g_sl`}{`online_sl` for \eqn{P(A=1|W)}; binomial family.}
-#'     \item{`epsilon_fit`}{1-D `stream_fit` (RLS-GLM) for the targeting
-#'       parameter \eqn{\varepsilon}.}
-#'     \item{`epsilon`}{Scalar \eqn{\varepsilon}: `epsilon_fit$beta[1]`.}
+#'     \item{`epsilon_fit`}{1-D `stream_fit` (RLS-GLM) seeded with the
+#'       final batch \eqn{\varepsilon}; used for incremental streaming updates.}
+#'     \item{`epsilon`}{Cumulative \eqn{\varepsilon} across all targeting
+#'       iterations: `sum(eps_k)`.  Equals `epsilon_fit$beta[1]` for Gaussian.}
+#'     \item{`n_iter`}{Number of targeting iterations actually run.}
+#'     \item{`iter_converged`}{Logical: did the score equation reach `tol`?}
 #'     \item{`target`}{`"ATE"` or `"ATT"`.}
 #'     \item{`family`}{Outcome family.}
 #'     \item{`g_clamp`}{Propensity clamping threshold.}
@@ -198,11 +206,13 @@
 online_tmle_fit <- function(W, A, Y,
                             Q_library, g_library,
                             outcome_family = stats::gaussian(),
-                            target  = c("ATE", "ATT"),
-                            k       = 5L,
-                            g_clamp = 0.01,
-                            gamma1  = 1.0,
-                            delta   = 0.6) {
+                            target   = c("ATE", "ATT"),
+                            k        = 5L,
+                            g_clamp  = 0.01,
+                            gamma1   = 1.0,
+                            delta    = 0.6,
+                            max_iter = 10L,
+                            tol      = 1e-6) {
   cl     <- match.call()
   target <- match.arg(target)
 
@@ -247,23 +257,52 @@ online_tmle_fit <- function(W, A, Y,
   Qa  <- predict(Q_sl, WA)
   g_c <- .g_clamp(predict(g_sl, W), g_clamp)
 
-  ## --- Targeting step: fit epsilon via 1-D RLS-GLM --------------------------
+  ## --- Iterative targeting: fluctuate Q along 1-D submodel until EIF ≈ 0 ---
+  ##
+  ## For any link function: linkfun(Q*_k) = linkfun(Q*_{k-1}) + eps_k * H
+  ## so after K iterations:  linkfun(Q*_K) = linkfun(Q) + epsilon_total * H
+  ## where epsilon_total = sum_k eps_k.  This means Q* depends only on the
+  ## unadapted Q and epsilon_total, which keeps the streaming update simple.
   mean_A  <- mean(A)
   H_batch <- .tmle_h(A, g_c, target, mean_A)
   Hcf     <- .tmle_h_cf(g_c, target, mean_A)
 
-  epsilon_fit <- rls_glm_fit(
-    X      = matrix(H_batch, ncol = 1L),
-    y      = Y,
-    family = outcome_family,
-    offset = outcome_family$linkfun(Qa)
-  )
-  epsilon <- epsilon_fit$beta[1L]
+  ## Running Q* starts at the unadapted Q; linkfun(Q*) accumulates eps_k * H.
+  Qa_star <- Qa
+  Q1_star <- Q1
+  Q0_star <- Q0
+  epsilon_total  <- 0
+  iter_converged <- FALSE
 
-  ## --- Targeted outcome predictions -----------------------------------------
-  Qa_star <- .tmle_q_star(Qa, H_batch,  epsilon, outcome_family)
-  Q1_star <- .tmle_q_star(Q1, Hcf$H1,  epsilon, outcome_family)
-  Q0_star <- .tmle_q_star(Q0, Hcf$H0,  epsilon, outcome_family)
+  for (iter in seq_len(max_iter)) {
+    eps_fit_iter <- rls_glm_fit(
+      X      = matrix(H_batch, ncol = 1L),
+      y      = Y,
+      family = outcome_family,
+      offset = outcome_family$linkfun(Qa_star)   # offset = linkfun of current Q*
+    )
+    eps_k         <- eps_fit_iter$beta[1L]
+    epsilon_total <- epsilon_total + eps_k
+
+    Qa_star <- .tmle_q_star(Qa_star, H_batch, eps_k, outcome_family)
+    Q1_star <- .tmle_q_star(Q1_star, Hcf$H1,  eps_k, outcome_family)
+    Q0_star <- .tmle_q_star(Q0_star, Hcf$H0,  eps_k, outcome_family)
+
+    if (abs(mean(H_batch * (Y - Qa_star))) < tol) {
+      iter_converged <- TRUE
+      break
+    }
+  }
+  n_iter <- iter   # number of iterations actually run
+
+  ## Seed epsilon_fit for streaming updates.
+  ## Use the last iteration's inverse-Fisher S (informative about curvature at
+  ## the converged point) but override beta to epsilon_total so that
+  ## epsilon_fit$beta[1] == epsilon_total exactly.  This avoids a spurious
+  ## second RLS-GLM pass that would corrupt epsilon_total for logistic families.
+  epsilon_fit        <- eps_fit_iter
+  epsilon_fit$beta   <- c(epsilon_total)
+  epsilon            <- epsilon_total
 
   ## --- TMLE EIF vector (uses starred Q) -------------------------------------
   eif_vec <- if (target == "ATE") {
@@ -287,21 +326,23 @@ online_tmle_fit <- function(W, A, Y,
 
   structure(
     list(
-      Q_sl        = Q_sl,
-      g_sl        = g_sl,
-      epsilon_fit = epsilon_fit,
-      epsilon     = epsilon,
-      target      = target,
-      family      = outcome_family,
-      g_clamp     = g_clamp,
-      psi         = psi,
-      eif_mean    = eif_mean,
-      eif_var     = eif_var,
-      eif_M2      = eif_M2,
-      sum_A       = sum_A,
-      n_batch     = n,
-      n_obs       = n,
-      call        = cl
+      Q_sl           = Q_sl,
+      g_sl           = g_sl,
+      epsilon_fit    = epsilon_fit,
+      epsilon        = epsilon,
+      n_iter         = n_iter,
+      iter_converged = iter_converged,
+      target         = target,
+      family         = outcome_family,
+      g_clamp        = g_clamp,
+      psi            = psi,
+      eif_mean       = eif_mean,
+      eif_var        = eif_var,
+      eif_M2         = eif_M2,
+      sum_A          = sum_A,
+      n_batch        = n,
+      n_obs          = n,
+      call           = cl
     ),
     class = "online_tmle"
   )
@@ -431,7 +472,9 @@ print.online_tmle <- function(x, digits = 4L, ...) {
   cat("Observations:", x$n_obs,
       sprintf("(%d batch + %d stream)\n",
               x$n_batch, x$n_obs - x$n_batch))
-  cat(sprintf("epsilon     : %.*f\n", digits, x$epsilon))
+  cat(sprintf("epsilon     : %.*f  (%d iter%s)\n",
+              digits, x$epsilon, x$n_iter,
+              if (isTRUE(x$iter_converged)) "" else ", not converged"))
   cat(sprintf("Estimate    : %.*f\n", digits, x$psi))
   cat(sprintf("Std. Error  : %.*f\n", digits, se))
   cat(sprintf("95%% CI      : [%.*f, %.*f]\n",

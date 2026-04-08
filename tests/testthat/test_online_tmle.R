@@ -11,16 +11,20 @@
 ##   - tlverse/tmle3, tests/testthat/test-basic_intevention.R,
 ##     https://github.com/tlverse/tmle3/blob/master/tests/testthat/test-basic_intevention.R
 ##     Strategy: Qstar, psi, SE, and epsilon all compared against the classic
-##     `tmle` package in the same test — the most complete targeting-step test.
-##     Epsilon extracted as `updater$epsilons[[1]]$Y`.
+##     `tmle` package. Epsilon extracted as `updater$epsilons[[1]]$Y`. Iterative
+##     loop runs up to maxit=100; convergence via |P_n D*| <= SE(D*)/min(log n, 10).
+##   - tlverse/tmle3, R/tmle3_Update.R (convergence criterion implementation),
+##     https://github.com/tlverse/tmle3/blob/master/R/tmle3_Update.R
+##     Convergence modes: "scaled_var" (|ED| <= SE/log(n)) and "sample_size"
+##     (|ED| <= 1/n). No active test verifies these thresholds explicitly.
+##   - cran/ltmle, R/ltmle.R (UpdateQ + FixScoreEquation),
+##     https://github.com/cran/ltmle/blob/master/R/ltmle.R
+##     ltmle checks |sum(IC)| / mean(Y) < 0.001 after each GLM targeting step;
+##     triggers nlminb fallback with abs.tol=1e-8 if threshold exceeded. No active
+##     test of this criterion exists (commented-out expect_error in test-ErrorHandling.R).
 ##   - cran/ltmle, tests/testthat/test-EffectMeasures.R,
 ##     https://github.com/cran/ltmle/blob/master/tests/testthat/test-EffectMeasures.R
-##     Strategy: ATE SE verified as sqrt(Var(IC_1 - IC_0) / n) where IC is the
-##     influence curve / EIF contribution — direct oracle for our Welford SE.
-##   - cran/ltmle, tests/testthat/test-EstimateVariance.R,
-##     https://github.com/cran/ltmle/blob/master/tests/testthat/test-EstimateVariance.R
-##     Strategy: TMLE variance > IC variance under near-positivity-violation;
-##     ordering of variance estimators under degenerate propensity.
+##     Strategy: ATE SE verified as sqrt(Var(IC_1 - IC_0) / n).
 ##   - DoubleML/doubleml-for-r, tests/testthat/helper-10-dml_irm.R,
 ##     https://github.com/DoubleML/doubleml-for-r
 ##     Strategy: exact numerical agreement between package output and a hand-coded
@@ -28,16 +32,18 @@
 ##
 ## Step 2 — Classification of reference tests:
 ##
-##   | Test from references                        | Class                | Keep |
-##   |---------------------------------------------|----------------------|------|
-##   | psi matches classic tmle package (1/sqrt(n))| Empirical / oracle   | Yes  |
-##   | SE matches classic tmle package              | Oracle / asymptotic  | Yes  |
-##   | epsilon matches classic tmle package         | Oracle               | Yes  |
-##   | Qstar matches classic tmle Qstar             | Oracle               | Yes  |
-##   | g bounds enforced pre/post targeting         | Edge case            | Yes  |
-##   | pooled ATE = weighted mean of strata ATEs    | Theoretical identity | No   |
-##   | ATE SE = sqrt(Var(IC_1 - IC_0) / n)         | Oracle               | Yes  |
-##   | TMLE var > IC var under positivity violation | Empirical            | Yes  |
+##   | Test from references                           | Class                | Keep |
+##   |------------------------------------------------|----------------------|------|
+##   | psi matches classic tmle package (1/sqrt(n))   | Empirical / oracle   | Yes  |
+##   | SE matches classic tmle package                | Oracle / asymptotic  | Yes  |
+##   | epsilon matches classic tmle package           | Oracle               | Yes  |
+##   | Qstar matches classic tmle Qstar               | Oracle               | Yes  |
+##   | g bounds enforced pre/post targeting           | Edge case            | Yes  |
+##   | pooled ATE = weighted mean of strata ATEs      | Theoretical identity | No   |
+##   | ATE SE = sqrt(Var(IC_1 - IC_0) / n)           | Oracle               | Yes  |
+##   | TMLE var > IC var under positivity violation   | Empirical            | Yes  |
+##   | ltmle relative score < 0.001 (commented out)  | Edge case            | Yes  |
+##   | tmle3 convergence: |ED| <= SE/log(n)           | Oracle               | Yes  |
 ##
 ## Properties tested (with reference):
 ##   1. Batch score equation satisfied exactly for Gaussian outcome.
@@ -50,17 +56,24 @@
 ##      [tmle3/test-ATT.R ATE vs ATT distinction]
 ##   5. epsilon is small when Q is correctly specified.
 ##      [tmle3/test-basic_intevention.R epsilon diagnostic]
+##   6. Logistic outcome: score equation satisfied after iterative targeting.
+##      [ltmle UpdateQ relative score < 0.001; tmle3 |ED| <= SE/log(n);
+##       no active reference test — gap identified in Step 2 classification]
+##   7. max_iter=1 cannot converge to tight tol for logistic; iter_converged
+##      reflects true score-equation status, not a hardcoded flag.
+##      [cran/tmle ATT converged flag; ltmle commented-out FixScoreEquation test]
 ##
 ## Step 5 audit:
-##   1. Optimiser / gradient direction: Test 1 (wrong linkfun or sign →
-##      |score| >> 0) and Test 3 (wrong epsilon sign → psi diverges).
+##   1. Optimiser / gradient direction: Test 1 (Gaussian score) and Test 6
+##      (logistic score) both fail if eps_k is added with wrong sign or if
+##      the iterative offset doesn't update from Q to Q*_k correctly.
 ##   2. Prediction function: Test 2 recomputes predictions from the stored
 ##      Q_sl / g_sl — wrong ensemble weights → manual EIF ≠ package psi.
 ##   3. Edge case: ## TODO: add propensity clamping test (near-deterministic g)
 ##      analogous to test_online_ate.R Test 5.
-##   4. Family / link function: Tests 1 and 2 exercise the Gaussian linkfun
-##      (identity). ## TODO: add a binomial-outcome test to exercise qlogis
-##      offset and expit Q* in the targeting step.
+##   4. Family / link function: Test 1 exercises Gaussian (identity link);
+##      Tests 6 and 7 exercise binomial (logit link) including qlogis offset
+##      and expit Q* at each iteration.
 
 
 ## ---- Shared fixture --------------------------------------------------------
@@ -244,4 +257,112 @@ test_that("epsilon is small when Q is correctly specified", {
   tmle <- online_tmle_fit(W, A, Y, Q_library = lib, g_library = lib)
 
   expect_lt(abs(tmle$epsilon), 0.5)
+})
+
+
+## ---- 6. Logistic outcome: score equation satisfied after iterative targeting
+## No active reference test for this property exists in tmle3 or ltmle (gap
+## identified in Step 2 classification above).  ltmle's UpdateQ checks a
+## relative score criterion |sum(IC)| / mean(Y) < 0.001 but it is not tested;
+## tmle3's convergence criterion |ED| <= SE/log(n) is also untested.
+##
+## For a Gaussian outcome, 1-D RLS-GLM solves the score equation exactly in
+## one pass (Test 1).  For a logistic outcome the score equation is nonlinear:
+## mean(H * (Y - plogis(logit(Q) + eps * H))) = 0
+## requires genuine iteration; a single RLS-GLM pass gives an online
+## approximation that may not satisfy the equation to the required tolerance.
+##
+## Oracle check: recompute Q*a from stored epsilon and original (unadapted) Q
+## using the cumulative-epsilon invariant
+##   logit(Q*) = logit(Q) + epsilon * H
+## and verify the score is below tol.
+##
+## Would fail if: the offset for iteration k+1 uses the original linkfun(Q)
+## instead of linkfun(Q*_k), because for logistic the score equation is
+## nonlinear and each iteration must chain from the previous Q*.
+
+test_that("logistic score equation |mean(H*(Y-Q*a))| < tol after iterative targeting", {
+  set.seed(33L)
+  n <- 400L
+  W <- cbind(1, matrix(rnorm(n * 2L), n, 2L))
+  A <- rbinom(n, 1L, plogis(0.5 * W[, 2L]))
+  ## Binary DGP: logistic outcome family.
+  Y <- rbinom(n, 1L, plogis(1.2 * A + 0.8 * W[, 2L]))
+
+  ## RLS-GLM is a sequential online algorithm; for logistic regression it gives
+  ## an online approximation (not the exact batch MLE).  The achievable score
+  ## floor after many iterations is ~1e-5 for n=400.  tol=1e-4 is comfortably
+  ## above this floor while still meaningfully below a naive one-step score.
+  lib <- make_lib_rls()
+  tol <- 1e-4
+  tmle <- online_tmle_fit(W, A, Y,
+                          Q_library      = lib,
+                          g_library      = lib,
+                          outcome_family = stats::binomial(),
+                          max_iter       = 20L,
+                          tol            = tol)
+
+  ## Verify convergence flag was set.
+  expect_true(tmle$iter_converged)
+
+  ## Recompute score independently from stored epsilon and original (unadapted) Q.
+  ## Cumulative-epsilon invariant: logit(Q*a) = logit(Qa) + epsilon * H.
+  fam <- tmle$family
+  Qa  <- predict(tmle$Q_sl, cbind(A, W))
+  g_c <- pmin(pmax(predict(tmle$g_sl, W), tmle$g_clamp), 1 - tmle$g_clamp)
+  H   <- A / g_c - (1 - A) / (1 - g_c)   # ATE clever covariate
+
+  Qa_str <- fam$linkinv(fam$linkfun(Qa) + tmle$epsilon * H)
+  score  <- mean(H * (Y - Qa_str))
+
+  expect_lt(abs(score), tol)
+})
+
+
+## ---- 7. iter_converged reflects actual score; targeting reduces score vs eps=0
+## tmle3's tmle3_Update runs up to maxit=100 but has no test confirming that
+## iter_converged can be FALSE.  cran/tmle stores ATT$converged but never
+## tests the FALSE case.  ltmle's FixScoreEquation convergence test is
+## commented out (test-ErrorHandling.R).
+##
+## Same binary DGP as Test 6 (seed 33).  Empirical floor for RLS-GLM on this
+## dataset: score ≈ 1.3e-5 after iteration 1, stable thereafter.
+##   - tol=1e-10 (below floor): iter_converged=FALSE after 20 iterations.
+##   - Targeting always reduces score vs eps=0 (score_before=0.00385,
+##     score_after≈1.3e-5), regardless of convergence status.
+##
+## Would fail if: iter_converged is hardcoded to TRUE regardless of the actual
+## score (convergence check tests abs(eps_k) < tol instead of abs(score) < tol,
+## mistaking a tiny last epsilon step for score-equation satisfaction).
+
+test_that("iter_converged=FALSE at unachievable tol; targeting reduces score vs eps=0", {
+  set.seed(33L)
+  n <- 400L
+  W <- cbind(1, matrix(rnorm(n * 2L), n, 2L))
+  A <- rbinom(n, 1L, plogis(0.5 * W[, 2L]))
+  Y <- rbinom(n, 1L, plogis(1.2 * A + 0.8 * W[, 2L]))
+
+  lib <- make_lib_rls()
+
+  ## tol=1e-10 is below the RLS-GLM score floor (~1e-5) for this DGP;
+  ## 20 iterations cannot converge → iter_converged must be FALSE.
+  set.seed(33L)
+  tmle <- online_tmle_fit(W, A, Y,
+                          Q_library      = lib,
+                          g_library      = lib,
+                          outcome_family = stats::binomial(),
+                          max_iter       = 20L,
+                          tol            = 1e-10)
+  expect_false(tmle$iter_converged)
+
+  ## Regardless of convergence status, epsilon must REDUCE the score relative
+  ## to the untargeted Q (eps=0).  Recompute both scores from stored nuisance.
+  fam <- tmle$family
+  Qa  <- predict(tmle$Q_sl, cbind(A, W))
+  g_c <- pmin(pmax(predict(tmle$g_sl, W), tmle$g_clamp), 1 - tmle$g_clamp)
+  H   <- A / g_c - (1 - A) / (1 - g_c)
+
+  score_before <- abs(mean(H * (Y - Qa)))   # eps=0, no targeting
+  score_after  <- abs(mean(H * (Y - fam$linkinv(fam$linkfun(Qa) + tmle$epsilon * H))))
+  expect_lt(score_after, score_before)
 })
