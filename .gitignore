@@ -42,6 +42,9 @@ src/*.o
 src/*.so
 src/*.dll
 
+# Local notes (not for version control)
+FUTUREWORK.md
+
 # macOS
 .DS_Store
 
